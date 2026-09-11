@@ -14,8 +14,8 @@ import numpy as np
 import mujoco
 
 from rclike import Node, ActionServer, GoalState, FrameTree
-from src.control.trajectory import min_jerk, Trajectory
-from src.control.impedance import AdmittanceController
+from legacy.src.control.trajectory import min_jerk, Trajectory
+from legacy.src.control.impedance import AdmittanceController
 
 # ---- 常量（迁移自 ChargingGunTask 类属性）----
 GUN_BODY, SOCKET_BODY, CAR_SOCKET_BODY = "charging_gun_1", "charing_socket", "car_socket"

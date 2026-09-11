@@ -13,8 +13,8 @@ import numpy as np
 import mujoco
 
 from rclike import Node
-from src.config import load_yaml, project_path          # 复用旧配置工具
-from src.control.gripper import Gripper                 # 只依赖 model/data，直接复用
+from rcs.paths import load_yaml, project_path              # 数据文件在仓库根
+from legacy.src.control.gripper import Gripper            # 绞杀期：复用旧模块
 
 
 class SimNode(Node):

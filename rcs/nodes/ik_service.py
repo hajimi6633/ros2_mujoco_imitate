@@ -7,7 +7,7 @@ ArmEnv 保持一致，因此 src/control/ik_solver.py 的 IKSolver
 from __future__ import annotations
 
 from rclike import Node
-from src.control.ik_solver import IKSolver       # 直接复用旧求解器
+from legacy.src.control.ik_solver import IKSolver       # 绞杀期：直接复用旧求解器
 
 
 class IKService(Node):

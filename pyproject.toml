@@ -15,4 +15,9 @@ rl = ["gymnasium"]
 view = ["mujoco-python-viewer"]
 
 [tool.setuptools]
-packages = ["src", "rclike", "rcs", "rcs.nodes", "rcs.tasks"]
+packages = ["rclike", "rcs", "rcs.nodes", "rcs.tasks",
+            "legacy", "legacy.src", "legacy.src.control", "legacy.src.env",
+            "legacy.src.env.tasks", "legacy.src.perception"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "legacy/tests"]
