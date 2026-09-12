@@ -6,6 +6,8 @@
   - threaded 节点不进主循环：add 时只启动其 worker 线程
 """
 from __future__ import annotations
+from time import perf_counter, sleep
+
 from rclike.core import SimClock
 from rclike.node import Node
 
@@ -42,20 +44,32 @@ class Executor:
                 tm["cb"]()
 
     def spin(self, n_ticks: int | None = None,
-             stop_when=None):
+             stop_when=None, realtime: bool = False):
         """阻塞运行。n_ticks=None 表示无限运行（Ctrl+C 结束）。
 
-        stop_when：每拍末调用的回调，返回 True 提前结束（正常走 shutdown），
-        用于"任务终态即退出"这类场景，避免结束后空转剩余拍数。
+        stop_when：每拍末调用的回调，返回 True 提前结束（正常走 shutdown）。
+        realtime：按 dt 墙钟节拍运行（仿真 1x 实时）。
+          默认 False 全速（CI/无头）；带显示窗口时应开启，
+          否则主循环全速会让仿真时间狂飙（动作快进十几倍）。
+          单拍超期时不追赶（如实呈现实时率 < 1x），落后过多重新对齐基准。
         """
         self._running = True
         i = 0
+        next_t = perf_counter() + self.dt if realtime else None
         try:
             while self._running and (n_ticks is None or i < n_ticks):
                 self.spin_once()
                 i += 1
                 if stop_when is not None and stop_when():
                     break
+                if next_t is not None:
+                    delay = next_t - perf_counter()
+                    if delay > 0:
+                        sleep(delay)
+                    next_t += self.dt
+                    # 落后超 1 拍：丢拍重新对齐，避免睡眠风暴连击
+                    if next_t < perf_counter() - self.dt:
+                        next_t = perf_counter() + self.dt
         except KeyboardInterrupt:
             pass
         finally:
