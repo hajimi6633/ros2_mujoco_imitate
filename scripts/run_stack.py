@@ -7,10 +7,11 @@
   python -m scripts.run_stack --cams                           # 只看相机窗口
   python -m scripts.run_stack --no-render --ticks 2500         # 关闭渲染数据流
 
-显示说明：
-  --viewer 主窗口 = MuJoCo 自带 passive viewer（交互视角，需桌面环境）
+显示说明（三者独立开关）：
+  --viewer 主窗口 = MuJoCo 自带 passive viewer（launch_passive，需桌面环境）
   --cams  相机窗口 = cam_e2h / cam_eih 两路画面（OpenCV 窗口，需 --render）
-  --render 默认开；无 GL 环境自动降级（渲染节点禁用并告警）
+  --render 渲染数据流 = 显式 MjrContext 离屏渲染管线，默认开；
+          无 GL 环境自动降级（渲染节点禁用并告警，栈继续运行）
 """
 from __future__ import annotations
 import argparse

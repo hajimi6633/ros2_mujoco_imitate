@@ -7,6 +7,8 @@
 安全链直达本节点，不经过任务层——对应真机安全继电器的位置。
 """
 from __future__ import annotations
+import time as pytime
+
 import numpy as np
 
 from rclike import Node
@@ -55,9 +57,10 @@ class ArmController(Node):
         return s[0].get("zone", ZONE_STOP)
 
     def _watchdog_expired(self) -> bool:
-        s = self._safety.latest
-        return s is not None and \
-            (self.clock.now - s[1]) > self.get_parameter("watchdog_s")
+        """安全节点活性检测（墙钟）：仿真时钟可快于实时，活性必须按墙钟判。"""
+        w = self._safety.latest_wall
+        return w is not None and \
+            (pytime.time() - w) > self.get_parameter("watchdog_s")
 
     def _scale(self, q_des) -> np.ndarray:
         """减速区：目标朝当前关节角收缩（q_cur + s·(q_des−q_cur)）。"""

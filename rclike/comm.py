@@ -4,8 +4,11 @@
   - publish 同步调用订阅回调，msg 传引用（numpy 零拷贝，无序列化）
   - 每条消息开销 ≈ 字典查找 + 函数调用（纳秒级）
   - 附带 latest 最新值缓存：旁路线程数据的消费端标准读取方式
+  - 附带 latest_wall（发布时刻的墙钟）：供 watchdog 类活性检测使用——
+    仿真时钟可快/慢于实时，进程活性必须用墙钟判定
 """
 from __future__ import annotations
+from time import time as _wall_time
 from typing import Callable, Any
 
 
@@ -16,10 +19,12 @@ class Topic:
         self.name = name
         self._subs: list[Callable] = []
         self._latest: tuple | None = None    # (msg, stamp)
+        self._latest_wall: float | None = None   # 最近一次发布的墙钟时刻
 
     def publish(self, msg: Any, stamp: float | None = None):
         """发布：直接传引用调用全部订阅回调（确定性顺序）。"""
         self._latest = (msg, stamp)
+        self._latest_wall = _wall_time()      # 到达墙钟（watchdog 专用）
         for cb in list(self._subs):           # 拷贝后再遍历，防回调中增删订阅
             cb(msg, stamp)
 
@@ -31,6 +36,11 @@ class Topic:
     def latest(self) -> tuple | None:
         """最近一次 (msg, stamp)。非阻塞读取旁路线程数据的标准入口。"""
         return self._latest
+
+    @property
+    def latest_wall(self) -> float | None:
+        """最近一次发布的墙钟时刻（None=从未发布）。用于活性/超时检测。"""
+        return self._latest_wall
 
 
 class Service:
