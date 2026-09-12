@@ -30,6 +30,11 @@
 
   <worldbody>
     <light name="spot" pos="0 0 3" dir="0 0 -1" directional="true"/>
+    <!-- 眼在手外相机：固定安装于工作区右前上方 (2.6,-3.4,2.6)，27° 俯角俯瞰
+         臂 + 充电座 + 车插座。xyaxes 由视线朝向工作区中心 (0.3,-0.5,0.7) 推导：
+         视线=-z（MuJoCo 惯例），z=(0.542,-0.684,0.448) 为相机后方，x=右，y=上。
+         粗定位 / 末端估计 / 安全哨兵共用。 -->
+    <camera name="cam_e2h" pos="2.6 -3.4 2.6" xyaxes="0.784 0.621 0 -0.274 0.346 0.909" fovy="55"/>
     <geom name="floor" type="plane" size="5 5 0.1" material="floor_mat"/>
 
     <!-- 工作台：桌面表面 z=0.67985，承接机械臂 0.1m 底座 -->

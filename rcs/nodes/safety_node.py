@@ -32,12 +32,16 @@ class SafetyNode(Node):
         self.declare_parameter("stop_radius", stop_radius, "停止区阈值 (m)")
         self.declare_parameter("image_timeout", image_timeout, "图像超时即失明 (s)")
         self._img = None
+        self._seen_first = False               # 启动宽限：未收到首帧前不视为失明
+        self._last_alive_wall = None             # 最近一帧的墙钟时刻（流中断判定）
         self._stop_evt = threading.Event()
         self._pub = self.create_publisher("/safety_state")
         self.zone = Zone.NORMAL
         self.create_subscription(image_topic, self._on_img)
 
     def _on_img(self, img, stamp):
+        self._seen_first = True
+        self._last_alive_wall = pytime.time()
         self._img = (img, stamp)
 
     def _detect_intruders(self, img) -> list:
@@ -56,10 +60,19 @@ class SafetyNode(Node):
 
     def _loop(self):
         while not self._stop_evt.is_set():
+            # 心跳：每循环发布当前 zone——ArmController 的 watchdog 依赖
+            # safety_state 周期性刷新，仅在 zone 变化时发布会导致误判超时
+            self._pub.publish({"zone": self.zone.value, "reason": "heartbeat"},
+                              stamp=self.clock.now)
             snap = self._img
-            # fail-safe：无图像或超时 = 哨兵失明 = 停止（不回退任何数据源）
-            if (snap is None or
-                    self.clock.now - snap[1] > self.get_parameter("image_timeout")):
+            if snap is None:
+                pytime.sleep(0.01)              # 等待下一帧（或启动首帧）
+                continue
+            # fail-safe：收到过首帧后墙钟停更 = 图像流中断 = 哨兵失明 = 停止。
+            # 判定用墙钟：渲染周期是墙钟现象，与仿真时钟速率（可快于实时）解耦
+            if (self._seen_first and self._last_alive_wall is not None and
+                    pytime.time() - self._last_alive_wall >
+                    self.get_parameter("image_timeout")):
                 self._set_zone(Zone.STOP, "image timeout")
                 pytime.sleep(0.01)
                 continue

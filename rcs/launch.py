@@ -39,8 +39,8 @@ def build_charging_stack(scene_xml: str, vision: bool = False,
     # ---- 旁路线程节点（render 开启才创建：渲染/安全绑定）----
     threaded = []
     if render:
-        threaded += [RenderNode(bus, clock, sim.model, "track", "/image_e2h"),
-                    RenderNode(bus, clock, sim.model, "wrist", "/image_eih"),
+        threaded += [RenderNode(bus, clock, sim.model, "cam_e2h", "/image_e2h"),
+                    RenderNode(bus, clock, sim.model, "cam_eih", "/image_eih"),
                     SafetyNode(bus, clock, "/image_e2h")]
         if vision:
             threaded += [VisionNode(bus, clock, "/image_e2h",

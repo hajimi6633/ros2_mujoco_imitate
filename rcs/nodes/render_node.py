@@ -5,6 +5,9 @@
   - 只消费 /state_snapshot（qpos + 时间戳），不碰主 MjData
   - 时间戳随快照 → image → pose 全链传递，新鲜度判断有依据
   - model 只读共享（MuJoCo 保证线程安全）
+
+GL 上下文线程绑定：Renderer 必须在 worker 线程内创建并在同一线程
+使用/释放（跨线程 make_current 会失败），故构造延迟到 _loop 内。
 """
 from __future__ import annotations
 import threading
@@ -22,8 +25,7 @@ class RenderNode(Node):
                  out_topic: str, fps: float = 30.0):
         super().__init__(f"render_{camera_name}", bus, clock)
         self.model = model                       # 只读共享
-        self.rdata = mujoco.MjData(model)        # 渲染专用 data（隔离）
-        self.renderer = mujoco.Renderer(model)    # 独立离屏 GL 上下文
+        self.rdata = mujoco.MjData(model)        # 渲染专用 data（隔离，无 GL 依赖）
         self.camera = camera_name
         self._period = 1.0 / fps
         self._pub = self.create_publisher(out_topic)
@@ -41,21 +43,24 @@ class RenderNode(Node):
 
     def _loop(self):
         """worker：渲染慢于快照时自动跳帧（永远渲染最新快照，不积压）。"""
-        while not self._stop_evt.is_set():
-            snap = self._snap
-            if snap is None:
-                pytime.sleep(0.001)
-                continue
-            qpos, stamp = snap
-            # 写入自己的 data；派生量重算也在这里（主线程无感）
-            self.rdata.qpos[:] = qpos
-            mujoco.mj_forward(self.model, self.rdata)
-            self.renderer.update_scene(self.rdata, camera=self.camera)
-            img = self.renderer.render()          # np.uint8 (H, W, 3)
-            self._pub.publish(img, stamp=stamp)   # 时间戳随快照传递
-            self._snap = None
-            pytime.sleep(self._period)
+        renderer = mujoco.Renderer(self.model)    # GL 上下文：本线程创建/使用
+        try:
+            while not self._stop_evt.is_set():
+                snap = self._snap
+                if snap is None:
+                    pytime.sleep(0.001)
+                    continue
+                qpos, stamp = snap
+                # 写入自己的 data；派生量重算也在这里（主线程无感）
+                self.rdata.qpos[:] = qpos
+                mujoco.mj_forward(self.model, self.rdata)
+                renderer.update_scene(self.rdata, camera=self.camera)
+                img = renderer.render()           # np.uint8 (H, W, 3)
+                self._pub.publish(img, stamp=stamp)   # 时间戳随快照传递
+                self._snap = None
+                pytime.sleep(self._period)
+        finally:
+            renderer.close()                     # GL 资源在同一线程释放
 
     def shutdown(self):
-        self._stop_evt.set()
-        self.renderer.close()
+        self._stop_evt.set()                     # worker 自行收尾 GL

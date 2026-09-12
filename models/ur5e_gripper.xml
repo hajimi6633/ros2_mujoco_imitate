@@ -84,6 +84,10 @@
                            quat 抵消父级 finger_base 的 180° 旋转，使本 site 坐标轴
                            与 attachment_site（= wrist_3 法兰系）对齐 -->
                       <site name="ee_link" pos="0 0 -0.072" quat="0 -0.7071068 -0.7071068 0" size="0.02"/>
+                      <!-- 眼在手上相机：局部 -z 即指尖/工具方向（MuJoCo 相机视线为 -z），
+                           位于两指中缝 y=0、壳底下缘。手指位于相机近处，会占据画面上下边缘
+                           （fovy=40 收窄以减小占比）；夹持枪柄时目标被柄体遮挡，后续可斜装指侧。 -->
+                      <camera name="cam_eih" pos="0 0 -0.035" fovy="40"/>
                       <body name="finger_left" pos="0 -0.0160500 -0.0874122">
                         <joint name="ll_grasp_joint" type="slide" axis="0 1 0" range="-0.025 0.01"/>
                         <geom name="finger_left" type="box" size="0.02 0.005 0.04" pos="0 -0.02 0.02" material="grip_mat"/>
