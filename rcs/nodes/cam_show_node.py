@@ -32,9 +32,7 @@ class CamShowNode(Node):
                 continue
             # imshow 会自动重建被关闭的窗口；已显示过的窗口先查可见性，
             # 用户点 X 关闭后标记跳过（首次显示前不可查，否则误判）
-            if title in self._shown and \
-                    not self.cv2.getWindowProperty(
-                        title, self.cv2.WND_PROP_VISIBLE):
+            if title in self._shown and not self._visible(title):
                 self._closed.add(title)
                 self.log.info(f"相机窗口 '{title}' 已被关闭，停止刷新")
                 continue
@@ -42,7 +40,27 @@ class CamShowNode(Node):
             # MuJoCo 渲染为 RGB，OpenCV 显示需转 BGR
             self.cv2.imshow(title,
                             self.cv2.cvtColor(s[0], self.cv2.COLOR_RGB2BGR))
-        self.cv2.waitKey(1)
+        try:
+            self.cv2.waitKey(1)
+        except Exception:
+            pass              # 全部窗口销毁后 QT 后端 waitKey 也可能抛错
+
+    def _visible(self, title) -> bool:
+        """窗口是否可见；QT 后端在全部窗口销毁后查询会抛错，视为已关闭。"""
+        try:
+            return bool(self.cv2.getWindowProperty(
+                title, self.cv2.WND_PROP_VISIBLE))
+        except Exception:
+            return False
+
+    # ---------- 窗口状态查询（run_stack 退出判定用） ----------
+    def any_open(self):
+        """是否仍有打开的相机窗口（已显示且未被用户关闭）。"""
+        return bool(self._shown - self._closed)
+
+    def ever_shown(self):
+        """是否显示过至少一帧（区分"尚未出图"与"渲染禁用"）。"""
+        return bool(self._shown)
 
     def shutdown(self):
         try:

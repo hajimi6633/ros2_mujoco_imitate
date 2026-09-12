@@ -17,8 +17,12 @@ class ViewerNode(Node):
 
     def on_tick(self):
         """每拍同步仿真状态到窗口（sync 轻量，50Hz 无压力）。"""
-        if self._viewer.is_running():
+        if self.is_open():
             self._viewer.sync()
+
+    def is_open(self):
+        """主窗口是否仍打开（用户点 X 关闭后为 False；退出判定用）。"""
+        return self._viewer.is_running()
 
     def shutdown(self):
         try:

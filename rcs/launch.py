@@ -70,6 +70,8 @@ def build_charging_stack(scene_xml: str, vision: bool = False,
     if safety is not None:
         ex.add(safety)                         # threaded：只启动 worker
 
+    # viewer/cam_show 供上层做退出判定（未启用时为 None）
     handles = {"task": task, "ctrl": ctrl, "sim": sim, "ik": ik,
-               "grasp": grasp, "pose": pose, "executor": ex}
+               "grasp": grasp, "pose": pose, "executor": ex,
+               "viewer": viewer_node, "cam_show": cam_show_node}
     return ex, handles
