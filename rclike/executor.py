@@ -41,14 +41,21 @@ class Executor:
                 tm["last"] = t
                 tm["cb"]()
 
-    def spin(self, n_ticks: int | None = None):
-        """阻塞运行。n_ticks=None 表示无限运行（Ctrl+C 结束）。"""
+    def spin(self, n_ticks: int | None = None,
+             stop_when=None):
+        """阻塞运行。n_ticks=None 表示无限运行（Ctrl+C 结束）。
+
+        stop_when：每拍末调用的回调，返回 True 提前结束（正常走 shutdown），
+        用于"任务终态即退出"这类场景，避免结束后空转剩余拍数。
+        """
         self._running = True
         i = 0
         try:
             while self._running and (n_ticks is None or i < n_ticks):
                 self.spin_once()
                 i += 1
+                if stop_when is not None and stop_when():
+                    break
         except KeyboardInterrupt:
             pass
         finally:

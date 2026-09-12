@@ -12,6 +12,7 @@
   --cams  相机窗口 = cam_e2h / cam_eih 两路画面（OpenCV 窗口，需 --render）
   --render 渲染数据流 = 显式 MjrContext 离屏渲染管线，默认开；
           无 GL 环境自动降级（渲染节点禁用并告警，栈继续运行）
+任务到达终态（成功/中止/取消）后自动退出并关闭全部窗口（--ticks 为拍数上限）。
 """
 from __future__ import annotations
 import argparse
@@ -52,7 +53,16 @@ def main():
         "相机窗口" if args.cams else ""]))
     print(f"========== 任务: {args.task}（{TASKS[args.task]['desc']}）"
           f" | 拍数: {args.ticks} | {modes} ==========")
-    ex.spin(n_ticks=args.ticks)
+    # 任务到达终态（成功/中止/取消）即结束：自动走 shutdown 关闭全部窗口，
+    # 否则 spin 会空转剩余拍数，相机窗口被 imshow 不断重建（关不掉）
+    from rclike import GoalState
+    action = h["task"].action
+
+    def task_done():
+        return action.handle is not None and action.handle.state in (
+            GoalState.SUCCEEDED, GoalState.ABORTED, GoalState.CANCELED)
+
+    ex.spin(n_ticks=args.ticks, stop_when=task_done)
 
 
 if __name__ == "__main__":

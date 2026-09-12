@@ -59,6 +59,25 @@ class RenderNode(Node):
         self._img = np.empty((self._rect.height, self._rect.width, 3),
                              dtype=np.uint8)
         self.create_subscription("/state_snapshot", self._on_snap)
+        # GL 上下文与 MjrContext 必须在构造期创建（而非惰性到第一拍）：
+        # --viewer 时 launch_passive 的后台线程会持续运行 GLFW 事件循环，
+        # GLFW 非线程安全，第一拍才创建会与 viewer 线程并发 init/create_window，
+        # 部分平台（Windows/WGL）直接失败 → 渲染禁用 → 相机窗口永不出现。
+        # 构造期创建可确保先于 viewer 线程启动（launch 组装顺序保证）。
+        # GL 初始化失败（无 GL 环境）仍自动降级禁用并告警，不阻塞整个栈。
+        if not RenderNode._gl_broken:
+            try:
+                self._ensure_gl()
+                self._ctx = mujoco.MjrContext(
+                    self.model, mujoco.mjtFontScale.mjFONTSCALE_150)
+            except Exception as e:            # gladLoadGL / 无 GL 库等
+                RenderNode._gl_broken = True   # 广播：全进程放弃 GL
+                RenderNode._gl = None
+                self._ctx = None
+                self._disabled = True
+                self.log.warn(f"GL 初始化失败，渲染全部禁用: {e}")
+        else:
+            self._disabled = True             # 兄弟节点已判定 GL 不可用
         RenderNode._active += 1
 
     @classmethod
@@ -74,27 +93,13 @@ class RenderNode(Node):
         self._snap = (qpos, stamp)
 
     def on_tick(self):
-        if self._disabled or RenderNode._gl_broken or self._snap is None:
-            if RenderNode._gl_broken and not self._disabled:
-                self._disabled = True          # 兄弟节点已判定 GL 不可用
+        if self._disabled or self._snap is None:
             return
         # 按仿真时钟节流：观察用途无需每个控制拍都渲染
         t = self.clock.now
         if self._last_t is not None and t - self._last_t < self._period - 1e-9:
             return
         self._last_t = t
-        # 惰性创建 MjrContext；无显示环境失败则降级禁用（栈继续运行）
-        if self._ctx is None:
-            try:
-                self._ensure_gl()
-                self._ctx = mujoco.MjrContext(
-                    self.model, mujoco.mjtFontScale.mjFONTSCALE_150)
-            except Exception as e:                # gladLoadGL / 无 GL 库等
-                RenderNode._gl_broken = True       # 广播：全进程放弃 GL
-                RenderNode._gl = None
-                self._disabled = True
-                self.log.warn(f"GL 初始化失败，渲染全部禁用: {e}")
-                return
         qpos, stamp = self._snap
         self._snap = None                         # 处理最新帧，跳帧不积压
         # 写入自己的 data；派生量重算也在这里（不影响主 MjData）
