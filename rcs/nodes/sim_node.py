@@ -14,7 +14,7 @@ import mujoco
 
 from rclike import Node
 from rcs.paths import load_yaml, project_path              # 数据文件在仓库根
-from legacy.src.control.gripper import Gripper            # 绞杀期：复用旧模块
+from rcs.control.gripper import Gripper                    # 夹爪封装（独立于 legacy 备份）
 
 
 class SimNode(Node):

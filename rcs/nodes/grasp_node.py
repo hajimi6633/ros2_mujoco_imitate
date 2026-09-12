@@ -13,8 +13,8 @@ from __future__ import annotations
 import mujoco
 
 from rclike import Node
-from legacy.src.control.grasp import GraspCoupler
-from legacy.src.control.constraints import ConstraintManager
+from rcs.control.grasp import GraspCoupler
+from rcs.control.constraints import ConstraintManager
 
 
 class GraspNode(Node):
