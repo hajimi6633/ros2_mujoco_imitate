@@ -16,13 +16,15 @@ class Executor:
     def __init__(self, clock: SimClock, dt: float = 0.05):
         self.clock = clock
         self.dt = dt                  # 控制拍周期（= n_substeps × timestep）
-        self._nodes: list[Node] = []
+        self._nodes: list[Node] = []          # 主循环节点
+        self._threaded: list[Node] = []       # 旁路线程节点（shutdown 需调）
         self._running = False
 
     def add(self, node: Node) -> Node:
         node.on_configure()
         node.on_activate()
         if node.threaded:
+            self._threaded.append(node)
             node.start()              # 旁路 worker 线程，不占主循环
         else:
             self._nodes.append(node)
@@ -76,8 +78,11 @@ class Executor:
             self._shutdown()
 
     def _shutdown(self):
+        # 主循环节点先停（停止产数据），再关旁路线程（消费端收尾释放资源）
         for node in self._nodes:
             node.on_deactivate()
             node.on_cleanup()
+            node.shutdown()
+        for node in self._threaded:
             node.shutdown()
         self._running = False
