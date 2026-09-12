@@ -1,17 +1,15 @@
-"""RenderNode：旁路离屏渲染 worker（threaded，每相机一个实例）。
+"""RenderNode：相机渲染节点（主线程，按 fps 节流）。
 
-快照模式（对话第 4 轮，解决 MjData 并发竞争）：
-  - 独立 MjData + 独立 GL 上下文，与主线程零共享可变状态
-  - 只消费 /state_snapshot（qpos + 时间戳），不碰主 MjData
-  - 时间戳随快照 → image → pose 全链传递，新鲜度判断有依据
-  - model 只读共享（MuJoCo 保证线程安全）
+Windows 下 worker 线程内初始化 GL 会失败（gladLoadGL error），
+故渲染在主线程执行（观察用途 10Hz 的开销可接受）：
+  - 快照模式不变：独立 MjData，只消费 /state_snapshot，不碰主 MjData
+  - 按仿真时钟节流（fps 参数），渲染不占满每个控制拍
+  - GL 初始化失败（无显示环境）自动降级禁用并告警，不阻塞整个栈；
+    此时 SafetyNode 收不到图像（启动宽限语义下保持放行，日志可查）
 
-GL 上下文线程绑定：Renderer 必须在 worker 线程内创建并在同一线程
-使用/释放（跨线程 make_current 会失败），故构造延迟到 _loop 内。
+后续模型复杂、渲染耗时挤占控制环时，可再引入独立渲染进程恢复旁路化。
 """
 from __future__ import annotations
-import threading
-import time as pytime
 
 import mujoco
 
@@ -19,48 +17,56 @@ from rclike import Node
 
 
 class RenderNode(Node):
-    threaded = True
+    # 类级标志：GL 初始化失败一次后全进程不再尝试——失败后重试会触发
+    # mujoco 内部 C++ 静态初始化递归崩溃（__cxa_guard_acquire）
+    _gl_broken = False
 
     def __init__(self, bus, clock, model, camera_name: str,
-                 out_topic: str, fps: float = 30.0):
+                 out_topic: str, fps: float = 10.0):
         super().__init__(f"render_{camera_name}", bus, clock)
         self.model = model                       # 只读共享
-        self.rdata = mujoco.MjData(model)        # 渲染专用 data（隔离，无 GL 依赖）
+        self.rdata = mujoco.MjData(model)        # 渲染专用 data（隔离）
         self.camera = camera_name
         self._period = 1.0 / fps
+        self._last_t = None
         self._pub = self.create_publisher(out_topic)
         self._snap = None                        # 最新快照槽（原子替换引用）
-        self._stop_evt = threading.Event()
+        self._renderer = None                     # 惰性创建（GL 失败降级）
+        self._disabled = False
         self.create_subscription("/state_snapshot", self._on_snap)
 
     def _on_snap(self, qpos, stamp):
-        """主线程回调：仅存引用（微秒级），立即返回。"""
+        """快照回调：仅存引用（微秒级）。"""
         self._snap = (qpos, stamp)
 
-    def start(self):
-        threading.Thread(target=self._loop, daemon=True,
-                         name=self.name).start()
-
-    def _loop(self):
-        """worker：渲染慢于快照时自动跳帧（永远渲染最新快照，不积压）。"""
-        renderer = mujoco.Renderer(self.model)    # GL 上下文：本线程创建/使用
-        try:
-            while not self._stop_evt.is_set():
-                snap = self._snap
-                if snap is None:
-                    pytime.sleep(0.001)
-                    continue
-                qpos, stamp = snap
-                # 写入自己的 data；派生量重算也在这里（主线程无感）
-                self.rdata.qpos[:] = qpos
-                mujoco.mj_forward(self.model, self.rdata)
-                renderer.update_scene(self.rdata, camera=self.camera)
-                img = renderer.render()           # np.uint8 (H, W, 3)
-                self._pub.publish(img, stamp=stamp)   # 时间戳随快照传递
-                self._snap = None
-                pytime.sleep(self._period)
-        finally:
-            renderer.close()                     # GL 资源在同一线程释放
+    def on_tick(self):
+        if self._disabled or RenderNode._gl_broken or self._snap is None:
+            if RenderNode._gl_broken and not self._disabled:
+                self._disabled = True          # 兄弟节点已判定 GL 不可用
+            return
+        # 按仿真时钟节流：观察用途无需每个控制拍都渲染
+        t = self.clock.now
+        if self._last_t is not None and t - self._last_t < self._period - 1e-9:
+            return
+        self._last_t = t
+        # 惰性创建 Renderer；无显示环境失败则降级禁用（栈继续运行）
+        if self._renderer is None:
+            try:
+                self._renderer = mujoco.Renderer(self.model)
+            except Exception as e:                # gladLoadGL / 无 GL 库等
+                RenderNode._gl_broken = True       # 广播：全进程放弃 GL
+                self._disabled = True
+                self.log.warn(f"GL 初始化失败，渲染全部禁用: {e}")
+                return
+        qpos, stamp = self._snap
+        self._snap = None                         # 处理最新帧，跳帧不积压
+        # 写入自己的 data；派生量重算也在这里（不影响主 MjData）
+        self.rdata.qpos[:] = qpos
+        mujoco.mj_forward(self.model, self.rdata)
+        self._renderer.update_scene(self.rdata, camera=self.camera)
+        img = self._renderer.render()            # np.uint8 (H, W, 3)
+        self._pub.publish(img, stamp=stamp)      # 时间戳随快照传递
 
     def shutdown(self):
-        self._stop_evt.set()                     # worker 自行收尾 GL
+        if self._renderer is not None:
+            self._renderer.close()

@@ -12,7 +12,7 @@ dependencies = [
 
 [project.optional-dependencies]
 rl = ["gymnasium"]
-view = ["mujoco-python-viewer"]
+view = ["mujoco-python-viewer", "opencv-python"]
 
 [tool.setuptools]
 packages = ["rclike", "rcs", "rcs.nodes", "rcs.tasks", "rcs.control"]
