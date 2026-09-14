@@ -62,6 +62,15 @@ class RenderNode(Node):
         self._vcam = mujoco.MjvCamera()
         self._vcam.fixedcamid = mujoco.mj_name2id(
             model, mujoco.mjtObj.mjOBJ_CAMERA.value, camera_name)
+        # 相机名不存在时 mj_name2id 返回 -1：若不拦截，渲染线程里
+        # mjv_updateScene 会触发 mujoco C 层 mju_error 直接 abort 整个
+        # 进程（无 Python traceback，仅一行 "ERROR: mjv_cameraFrustum:
+        # fixed camera id is outside valid range"）——改为构造期明确报错
+        if self._vcam.fixedcamid < 0:
+            raise ValueError(
+                f"模型中不存在相机 '{camera_name}'（场景 XML 缺失/改名？）"
+                f"——可用相机: {[mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_CAMERA, i)
+                                for i in range(model.ncam)]}")
         self._vcam.type = mujoco.mjtCamera.mjCAMERA_FIXED
         # 分辨率不得超出模型离屏帧缓冲（默认 640x480），超出会被裁剪
         self._rect = mujoco.MjrRect(
