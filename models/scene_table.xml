@@ -18,6 +18,14 @@
     <texture name="floor_tex" type="2d" builtin="checker" width="512" height="512" rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3"/>
     <material name="floor_mat" texture="floor_tex" texrepeat="8 8" reflectance="0.2"/>
     <material name="table_mat" rgba="0.4 0.3 0.2 1"/>
+    <!-- ArUco DICT_4X4_50（270px：200 图案 + 35 白边，图案占比 200/270）。
+         PnP 的 marker_size = 板宽 × 0.7407（图案黑白边界间距，不含白边）。
+         id=0 场景标定码板（e2h），id=1 枪尾码板（eih）——不同 id 保证
+         同帧双码可见时 VisionNode 按 id 取目标不混淆 -->
+    <texture name="aruco0" type="2d" file="meshes/aruco0.png"/>
+    <material name="aruco0_mat" texture="aruco0"/>
+    <texture name="aruco1" type="2d" file="meshes/aruco1.png"/>
+    <material name="aruco1_mat" texture="aruco1"/>
   </asset>
 
   <default>
@@ -53,12 +61,22 @@
     </body> -->
 
     <!-- 侵入者模拟（mocap body，主窗口双击选中后 Ctrl+右键拖动）：
-         纯视觉体（contype/conaffinity=0 不参与物理碰撞），身高 ~1.7m 胶囊。
-         初始放在 e2h 相机视野外（相机后方），拖近工作区即模拟人侵入，
-         SafetyNode 背景差分检测 → 减速/停止分区 → 任务挂起。 -->
+         纯视觉体（不参与物理碰撞），身高 ~1.7m 胶囊。
+         颜色为亮黄（场景唯一：枪/插座红、臂灰、地板蓝灰、pan 绿）——
+         SafetyNode 颜色分割按"特定颜色目标物"检测，画面其他变化
+         （含机械臂运动）不触发安全响应。初始在 e2h 相机视野外。 -->
     <body name="intruder" mocap="true" pos="3.5 2.0 0">
-      <geom name="intruder_body" type="capsule" fromto="0 0 0.15 0 0 1.35" size="0.22" rgba="0.85 0.25 0.1 1" contype="0" conaffinity="0"/>
-      <geom name="intruder_head" type="sphere" pos="0 0 1.5" size="0.13" rgba="0.85 0.25 0.1 1" contype="0" conaffinity="0"/>
+      <geom name="intruder_body" type="capsule" fromto="0 0 0.15 0 0 1.35" size="0.22" rgba="0.9 0.75 0.1 1" contype="0" conaffinity="0"/>
+      <geom name="intruder_head" type="sphere" pos="0 0 1.5" size="0.13" rgba="0.9 0.75 0.1 1" contype="0" conaffinity="0"/>
+    </body>
+
+    <!-- 场景 ArUco 标定码板（e2h 视觉验证道具，悬空纯视觉体）：
+         板心 (2.0,-2.0,1.2)：投影 (414,386) 画面内，距 1.97m → 图案 ~104px。
+         图案物理边长 0.6 × 0.7407 ≈ 0.444m（PnP marker_size 用此值）。
+         板上不放 site（渲染球会遮挡图案中心导致解码失败）：
+         图案中心 GT = body 位姿 + R·(0,0,0.01)（+z 面表面偏移） -->
+    <body name="scene_marker" pos="2.0 -2.0 1.2" quat="0.913899 0.378549 0.135435 0.056099">
+      <geom name="scene_marker" type="box" size="0.3 0.3 0.01" material="aruco0_mat" contype="0" conaffinity="0"/>
     </body>
 
     <!-- 充电枪 1：freejoint 使其可被抓取移动，初始由 eq_socgun_1 weld 固定在插座 -->
@@ -74,9 +92,22 @@
       <body name="gun_pan">
         <geom name="gun_col_6" type="cylinder" size="0.05 0.01" rgba="0.9 0.2 0.2 1" pos="0.0 0 -0.1" quat="1 0 0 0" solref="0.06 1"/>
       </body>
-      <site name="gun_site_1" type="sphere" rgba="1 0 1 1" size="0.01" quat="1 0 0 -1" pos="0 0 -0.3058310"/>
-      <site name="gun_site_2" type="sphere" rgba="1 0 1 1" size="0.01" quat="1 0 0 -1" pos="0 0 -0.3958310"/>
-      <site name="gun_site" type="sphere" rgba="1 0 1 1" size="0.01" quat="1 0 0 -1" pos="0 0 0"/>
+      <!-- site rgba alpha=0：纯几何参考不渲染——枪轴上的渲染球会遮挡
+           尾部 ArUco 码板中心（gun_site_2 距码板仅 2.6cm 正前方） -->
+      <site name="gun_site_1" type="sphere" rgba="1 0 1 0" size="0.01" quat="1 0 0 -1" pos="0 0 -0.3058310"/>
+      <site name="gun_site_2" type="sphere" rgba="1 0 1 0" size="0.01" quat="1 0 0 -1" pos="0 0 -0.3958310"/>
+      <site name="gun_site" type="sphere" rgba="1 0 1 0" size="0.01" quat="1 0 0 -1" pos="0 0 0"/>
+      <!-- 枪尾 ArUco 码板（eih 手眼验证）：id=1，局部 -z 面朝 EE 接近方向。
+           板 0.10m → 图案 0.10×0.7407≈0.074m（PnP marker_size）。
+           面朝向注意：MuJoCo box 的 -z 面从外侧看呈正常图案（+z 面亦然，
+           侧贴有镜像），实测 quat=1 时 eih 可正常解码；
+           EE 沿枪轴正对接近时枪头圆盘（r=0.05，码板前方 0.32m）会完全
+           遮挡码板——伺服段以斜视角（~30°）观测枪尾；
+           板上不放 site（渲染球遮挡图案中心致解码失败），图案中心
+           GT = body 位姿 + R·(0,0,-0.003)。纯视觉体不参与碰撞/接触 -->
+      <body name="gun_marker" pos="0 0 -0.422" quat="1 0 0 0">
+        <geom name="gun_marker" type="box" size="0.05 0.05 0.003" material="aruco1_mat" contype="0" conaffinity="0"/>
+      </body>
     </body>
 
     <!-- 充电插座 -->

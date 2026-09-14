@@ -7,18 +7,20 @@
      任务挂起走慢通道（ChargingAction 订阅本话题）
 两级分区：减速区（限速继续）→ 停止区（冻结 · 保持夹持）。
 
-检测实现（仿真验证期方案：固定相机背景差分）：
-  1. 首帧图像为背景（相机固定，静态场景）
-  2. 逐帧差分 + 阈值 + 形态学开运算去噪 + 连通域面积过滤 → 前景目标
-  3. 机器人圆柱掩膜：以基座为轴、可达半径 R、高 H 的竖直圆柱，
-     逐像素做射线-圆柱求交（闭式解，numpy 全图向量化），交上的像素
-     不参与差分——臂/枪全程在圆柱内运动，否则臂运动会误报侵入
-     （人只有走到圆柱视线遮挡区才漏检，此时距离判定早已进入 STOP）
-  4. 连通域底部像素（脚）反投影射线与地面 z=0 求交 → 世界坐标
-  5. d = 距基座水平距离 − R（到工作区边界的距离）→ zone 判定
+检测实现（特定颜色目标物分割，非画面变化）：
+  依据是"黄色标识物（intruder 胶囊）出现在画面中并靠近"，
+  而非背景差分——画面任何其他变化（含机械臂运动、物体被移动）
+  都不触发安全响应：
+  1. RGB→HSV → 亮黄色 inRange 分割（场景唯一色：枪/插座红、臂灰、
+     地板蓝灰、pan 绿，无颜色冲突）
+  2. 形态学闭运算填高光空洞 + 连通域面积过滤 → 目标
+  3. 目标底部像素（脚）反投影射线与地面 z=0 求交 → 世界坐标
+  4. d = 距基座水平距离 − 工作半径 → zone 判定
+  注意：启动后 SafetyNode 默认不创建（launch safety=False），
+  run_stack --safety 显式开启。
 
-侵入者模拟：场景中 intruder 为 mocap body（无碰撞纯视觉），
-主窗口双击选中后 Ctrl+右键拖动即模拟人走近（SimNode 快照已带 mocap）。
+fail-safe 恢复语义：检测消失 ≠ 安全（可能被工作区遮挡），
+STOP 有最短保持时长 + 恢复需连续无侵入帧（去抖）。
 
 真机迁移期替换 _detect_intruders / _min_distance 为
 YOLO-nano 人体检测 + 3D 定位（接口不变，见 TODO 注释）。
@@ -53,18 +55,23 @@ class SafetyNode(Node):
         self.declare_parameter("image_timeout", image_timeout, "图像超时即失明 (s)")
         self.declare_parameter("workspace_radius", 1.3,
                                "机器人工作区圆柱半径 (m)：含臂展+枪全程轨迹")
-        self.declare_parameter("workspace_height", 2.2, "工作区圆柱高 (m)")
-        self.declare_parameter("diff_threshold", 25, "背景差分灰度阈值")
+        self.declare_parameter("ground_inset", 0.35,
+                               "反投影保守补偿 (m)：连通域底边为胶囊朝相机"
+                               "前缘像素，射线延长到地面系统性偏远 ~0.2-0.35m，"
+                               "直接减去以免触发偏晚（不保守方向）")
+        self.declare_parameter("hue_lo", 10, "目标色 H 下界（OpenCV 0-180）")
+        self.declare_parameter("hue_hi", 30, "目标色 H 上界（OpenCV 0-180）")
+        self.declare_parameter("sat_lo", 80, "目标色饱和度下界 (0-255)")
+        self.declare_parameter("val_lo", 80, "目标色明度下界 (0-255)")
         self.declare_parameter("min_area", 300, "前景连通域最小面积 (px)")
-        # fail-safe 恢复语义：检测消失 ≠ 安全（可能被工作区圆柱视线遮挡）
+        # fail-safe 恢复语义：检测消失 ≠ 安全（可能被工作区遮挡）
         self.declare_parameter("stop_hold_s", 2.0,
                                "STOP 最短保持时长 (s)：防遮挡漏检即刻放行")
         self.declare_parameter("clear_frames", 5,
                                "恢复 NORMAL 需连续无侵入帧数（防边缘抖动）")
         self._img = None
-        self._bg = None                       # 背景帧（灰度 float32，首帧锁定）
-        self._mask = None                     # 机器人圆柱掩膜（按分辨率惰性构建）
-        self._intruders: list = []            # 最新检测的侵入者（像素域）
+        self._shape = None                      # 最近帧分辨率（内参按此取）
+        self._intruders: list = []              # 最新检测的侵入者（像素域）
         self._seen_first = False               # 启动宽限：未收到首帧前不视为失明
         self._last_alive_wall = None             # 最近一帧的墙钟时刻（流中断判定）
         self._stop_evt = threading.Event()
@@ -88,7 +95,7 @@ class SafetyNode(Node):
         self._base = data.xpos[bid].copy() if bid >= 0 \
             else np.zeros(3)
 
-    # ---------- 检测（背景差分 + 圆柱掩膜 + 连通域） ----------
+    # ---------- 检测（颜色分割 + 连通域） ----------
     def _on_img(self, img, stamp):
         self._seen_first = True
         self._last_alive_wall = pytime.time()
@@ -99,61 +106,26 @@ class SafetyNode(Node):
         f = (h / 2) / np.tan(np.radians(self._fovy) / 2)
         return f, f, w / 2, h / 2
 
-    def _build_mask(self, h, w):
-        """机器人圆柱掩膜：逐像素射线-圆柱求交（numpy 向量化闭式解）。
-
-        返回 bool 数组，True = 允许检测（圆柱外）；臂/枪被圆柱罩住不误报。
-        """
-        fx, fy, cx, cy = self._K(h, w)
-        us, vs = np.meshgrid(np.arange(w, dtype=float),
-                             np.arange(h, dtype=float))
-        # 像素 → 相机系射线（图像 v 向下 = 相机 -y；MuJoCo 相机看向 -z）
-        d_cam = np.stack([(us - cx) / fx, -(vs - cy) / fy,
-                          -np.ones_like(us)], axis=-1)
-        # 相机系 → 世界系
-        d = np.einsum("ij,hwj->hwi", self._cam_R, d_cam)
-        # 2D 射线-圆求交：解 |o_xy + t·d_xy − base_xy| = R
-        o = self._cam_pos
-        ex, ey = d[..., 0], d[..., 1]
-        ox, oy = o[0] - self._base[0], o[1] - self._base[1]
-        R = self.get_parameter("workspace_radius")
-        a = ex * ex + ey * ey
-        b = 2 * (ox * ex + oy * ey)
-        c = ox * ox + oy * oy - R * R
-        disc = b * b - 4 * a * c
-        hit = np.zeros((h, w), dtype=bool)
-        ok = disc > 0          # 有实根 = 射线与无限长圆柱相交
-        sq = np.sqrt(np.where(ok, disc, 0.0))
-        # 相机在圆柱外：取近交点 t = (−b − √disc) / 2a
-        with np.errstate(divide="ignore", invalid="ignore"):
-            t = (-b - sq) / (2 * a)
-        ok &= np.isfinite(t) & (t > 0)
-        z = o[2] + t * d[..., 2]
-        hit |= ok & (z >= 0) & (z <= self.get_parameter("workspace_height"))
-        return ~hit                         # True = 圆柱外，允许检测
-
     def _detect_intruders(self, img) -> list:
-        """背景差分 → 前景连通域。
+        """HSV 亮黄色分割 → 目标连通域。
 
+        只响应"特定颜色标识物"（intruder 胶囊）；画面其他变化
+        （臂运动、物体移动、光照波动）不在分割范围内，不触发。
         返回 [{"bottom": (u, v), "area": px}, ...]（v 最大行 = 脚部像素）。
-        TODO 真机迁移：YOLO-nano 人体检测 + 分割（返回值结构不变）。
+        TODO 真机迁移：YOLO-nano 人体检测（返回值结构不变）。
         """
         import cv2                              # 懒加载
-        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY).astype(np.float32)
-        if self._bg is None:
-            self._bg = gray                     # 首帧锁背景（相机固定）
-            return []
-        if self._mask is None or self._mask.shape != gray.shape:
-            self._mask = self._build_mask(*gray.shape)
-        thr = self.get_parameter("diff_threshold")
-        diff = np.abs(gray - self._bg) > thr
-        diff &= self._mask                      # 只看圆柱外（臂不误报）
-        # 开运算去孤立噪点 + 闭运算填目标内部空洞
+        hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
+        lo = (self.get_parameter("hue_lo"),
+              self.get_parameter("sat_lo"),
+              self.get_parameter("val_lo"))
+        hi = (self.get_parameter("hue_hi"), 255, 255)
+        mask = cv2.inRange(hsv, np.array(lo, np.uint8), np.array(hi, np.uint8))
+        # 闭运算填目标内部高光空洞；开运算去孤立噪点
         kernel = np.ones((5, 5), np.uint8)
-        diff = cv2.morphologyEx(diff.astype(np.uint8), cv2.MORPH_OPEN,
-                                kernel)
-        diff = cv2.morphologyEx(diff, cv2.MORPH_CLOSE, kernel)
-        n, labels, stats, _ = cv2.connectedComponentsWithStats(diff)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        n, labels, stats, _ = cv2.connectedComponentsWithStats(mask)
         out = []
         min_area = self.get_parameter("min_area")
         for i in range(1, n):                 # 0 = 背景
@@ -166,17 +138,18 @@ class SafetyNode(Node):
     def _min_distance(self, intruders) -> float:
         """侵入者到工作区边界的最小距离（世界系，m）。
 
-        底部像素射线与地面 z=0 求交 → 距基座水平距离 − 工作半径。
-        俯视反投影的系统性误差 ~0.3m，方向偏保守（提前触发），可接受。
+        底部像素射线与地面 z=0 求交 → 距基座水平距离 − 工作半径 − 保守补偿
+        （连通域底边是目标朝相机的前缘像素，反投影偏远；见 ground_inset）。
         TODO 真机迁移：检测框 + 深度图 / 地面平面拟合。
         """
-        if not intruders:
+        if not intruders or self._shape is None:
             return float("inf")
-        h, w = self._bg.shape
+        h, w = self._shape
         fx, fy, cx, cy = self._K(h, w)
         o, R3 = self._cam_pos, self._cam_R
         best = float("inf")
         R_ws = self.get_parameter("workspace_radius")
+        inset = self.get_parameter("ground_inset")
         for it in intruders:
             u, v = it["bottom"]
             # MuJoCo 相机看向 -z：射线 z 分量为负
@@ -189,7 +162,7 @@ class SafetyNode(Node):
                 continue
             p = o + t * d                     # 地面交点
             dist = np.hypot(p[0] - self._base[0], p[1] - self._base[1])
-            best = min(best, dist - R_ws)
+            best = min(best, dist - R_ws - inset)
         return best
 
     # ---------- worker（心跳 + fail-safe + 检测） ----------
@@ -216,6 +189,7 @@ class SafetyNode(Node):
                 pytime.sleep(0.01)
                 continue
             img, _ = snap
+            self._shape = img.shape[:2]
             self._intruders = self._detect_intruders(img)
             d = self._min_distance(self._intruders)
             now = pytime.monotonic()

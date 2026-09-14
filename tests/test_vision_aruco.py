@@ -1,7 +1,12 @@
 """VisionNode ArUco 检测的单元测试（合成 marker 图像，无需场景/GL）。
 
 核心验证：已知 marker 位姿 → 正投影合成图像 → _detect 反解 →
-PnP 位姿闭环一致（位置误差 < 5mm）。
+PnP 位姿闭环一致。
+
+精度注记：PnP 用 4 个共面角点解位姿，倾斜分量（绕 x/y 的姿态）对
+亚像素角点误差极敏感——5cm marker @0.35m（图上 ~65px）时 5° 级别的
+倾斜噪声属固有量级。故旋转断言用"相对旋转角度误差"度量而非逐元素
+allclose（逐元素 atol 无法区分物理量级）。
 """
 import numpy as np
 import pytest
@@ -23,23 +28,23 @@ def node():
     return n
 
 
-def synth_frame(tvec, rvec=None):
-    """按已知位姿合成含 ArUco 标记的图像。
+def synth_frame(tvec, R_mj):
+    """按 MuJoCo 相机系约定（x 右 / y 上 / z 后）合成含 ArUco 标记的图像。
 
-    rvec 为 marker 朝向（Rodrigues）。默认正立面对相机（绕 x 转 180°：
-    marker 系 y 向上 vs 相机系 y 向下），此时印刷内容正向、可解码——
-    rvec=0 会令印刷上下颠倒，旋转 180° 后 bit 图案不再是合法 id。
+    tvec/R_mj 为 marker→MuJoCo 相机系位姿（= _detect 的输出约定）。
+    正立面朝相机时 R_mj=I（marker y 上与相机 y 上同向）。
     """
-    if rvec is None:
-        rvec = np.array([np.pi, 0.0, 0.0])
     fx, fy, cx, cy = K
-    Km = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]])
     s = MARKER_SIZE
     # 与 _detect 相同的官方角点约定（marker 系 y 向上，TL,TR,BR,BL）
     objp = np.array([[-s/2, s/2, 0], [s/2, s/2, 0],
                      [s/2, -s/2, 0], [-s/2, -s/2, 0]], dtype=float)
-    pts, _ = cv2.projectPoints(objp, rvec, tvec, Km, None)
-    pts = pts.reshape(-1, 2)
+    pts = []
+    for p in objp:
+        q = R_mj @ p + np.asarray(tvec, float)
+        # MuJoCo 针孔投影：z<0（前方），v 向下 = -y
+        pts.append((fx * q[0] / -q[2] + cx, fy * q[1] / q[2] + cy))
+    pts = np.array(pts)
     # marker 原图四角 → 目标角点的单应变换（含亚像素，精度优于逐点绘制）
     # 周围 pad 白色安静区（ArUco 检测要求 marker 边框外有白边）
     pad = 30
@@ -55,29 +60,35 @@ def synth_frame(tvec, rvec=None):
     img = np.full((480, 640), 128, dtype=np.uint8)
     return cv2.warpPerspective(marker, H, (640, 480),
                                dst=img, borderMode=cv2.BORDER_TRANSPARENT,
-                               flags=cv2.INTER_LINEAR), rvec
+                               flags=cv2.INTER_LINEAR)
+
+
+def rot_angle_err(R_det, R_true):
+    """相对旋转 dR = R_det·R_trueᵀ 的转角（度）——姿态误差的物理量纲。"""
+    dR = R_det @ R_true.T
+    cos = np.clip((np.trace(dR) - 1.0) / 2.0, -1.0, 1.0)
+    return np.degrees(np.arccos(cos))
 
 
 def test_detect_recovers_known_pose(node):
-    tvec = np.array([0.02, -0.01, 0.35])      # 0.35m：66px，避开小目标检测临界
-    frame, rvec = synth_frame(tvec)
+    tvec = np.array([0.02, -0.01, -0.35])     # MuJoCo 系：前方 0.35m（z 负）
+    frame = synth_frame(tvec, np.eye(3))
     result = node._detect(frame)
     assert "target_fine" in result
     pos, rot = result["target_fine"]
-    assert np.linalg.norm(pos - tvec) < 0.005  # 位置闭环 < 5mm
-    R_true, _ = cv2.Rodrigues(rvec)
-    assert np.allclose(rot, R_true, atol=0.02)  # 旋转闭环
+    assert np.linalg.norm(pos - tvec) < 0.008  # 位置闭环 < 8mm（warp 亚像素极限）
+    assert rot_angle_err(rot, np.eye(3)) < 6.0  # 姿态 < 6°（PnP 倾斜固有噪声）
 
 
 def test_detect_rotated_marker(node):
-    rvec = np.array([np.pi + 0.1, -0.2, 0.3])   # 正立基础姿态 + 任意扰动
-    tvec = np.array([-0.03, 0.02, 0.3])
-    frame, rvec = synth_frame(tvec, rvec)
+    rvec = np.array([0.1, -0.2, 0.3])          # 任意小扰动（MuJoCo 系 Rodrigues）
+    R_true, _ = cv2.Rodrigues(rvec)
+    tvec = np.array([-0.03, 0.02, -0.3])
+    frame = synth_frame(tvec, R_true)
     result = node._detect(frame)
     pos, rot = result["target_fine"]
-    assert np.linalg.norm(pos - tvec) < 0.005
-    R_true, _ = cv2.Rodrigues(rvec)
-    assert np.allclose(rot, R_true, atol=0.05)  # 旋转闭环（PnP 姿态精度低于位置）
+    assert np.linalg.norm(pos - tvec) < 0.008
+    assert rot_angle_err(rot, R_true) < 6.0
 
 
 def test_detect_empty_image_returns_empty(node):

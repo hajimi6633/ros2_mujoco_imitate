@@ -5,7 +5,8 @@
   eih —— 眼在手上：目标精定位（相机位姿由 FK 给出，只解相机系下目标位姿）
 
 检测实现（仿真验证期方案：ArUco + PnP，接口按实施顺序第 1 步）：
-  - 图像 → ArUco 检测（DICT_4X4_50）→ solvePnP → marker 位姿
+  - 图像 → ArUco 检测（DICT_4X4_50，按 marker_id 过滤目标码）→
+    solvePnP → marker 位姿
   - eih：输出相机系 {"target_fine": (pos, rot)}（真机迁移只换内参）
   - e2h：经固定相机外参转世界系 {"ee_pose": (pos, rot)}
     （marker 贴在末端即末端估计；贴在目标即粗定位——输出键按 role 固定）
@@ -32,12 +33,13 @@ class VisionNode(Node):
     def __init__(self, bus, clock, image_topic: str, out_topic: str,
                  role: str = "e2h", fps: float = 10.0,
                  sim=None, camera: str | None = None,
-                 marker_size: float = 0.05):
+                 marker_size: float = 0.05, marker_id: int | None = None):
         super().__init__(f"vision_{role}", bus, clock)
         assert role in ("e2h", "eih"), "role 必须是 e2h / eih"
         self.role = role
         self._period = 1.0 / fps
         self._marker_size = marker_size       # ArUco 实物边长 (m)
+        self._marker_id = marker_id           # 指定 id（None=任意，取第一个）
         self._pub = self.create_publisher(out_topic)
         self._img = None                     # 最新图像槽（原子替换引用）
         self._stop_evt = threading.Event()
@@ -70,6 +72,11 @@ class VisionNode(Node):
     def _detect(self, img) -> dict:
         """ArUco 检测 + PnP → 按 role 输出位姿。
 
+        坐标系约定：OpenCV solvePnP 输出（x 右 / y 下 / z 前）需转
+        MuJoCo 相机系（x 右 / y 上 / z 后）——绕 x 翻 180°（M=diag(1,-1,-1)，
+        M²=I）：p_mj = M·p_cv，R_mj = M·R_cv。渲染图像按 MuJoCo 相机生成，
+        不转则位置差一个镜像翻转（实测误差达米级）。
+
         e2h: {"ee_pose": (pos_world, rot_world)}   marker 贴末端时
         eih: {"target_fine": (pos_cam, rot_cam)}
         无检测 / 无内参 → {}（下游按缺数据语义处理，不猜测）。
@@ -84,18 +91,29 @@ class VisionNode(Node):
         corners, ids, _ = det.detectMarkers(img)
         if ids is None or len(ids) == 0:
             return {}
+        # 按 id 取目标码（多码同帧时明确指定，避免取错目标）
+        if self._marker_id is not None:
+            hits = [k for k, mid in enumerate(ids.ravel())
+                    if mid == self._marker_id]
+            if not hits:
+                return {}
+            k = hits[0]
+        else:
+            k = 0
         # 单 marker PnP：角点顺序 TL,TR,BR,BL（ArUco 惯例）→ marker 系 3D 点
         s = self._marker_size
         objp = np.array([[-s/2, s/2, 0], [s/2, s/2, 0],
                          [s/2, -s/2, 0], [-s/2, -s/2, 0]], dtype=float)
-        ok, rvec, tvec = cv2.solvePnP(objp, corners[0], K, None)
+        ok, rvec, tvec = cv2.solvePnP(objp, corners[k], K, None)
         if not ok:
             return {}
-        rot_cam, _ = cv2.Rodrigues(rvec)      # marker → 相机系旋转
-        pos_cam = tvec.ravel()
+        rot_cv, _ = cv2.Rodrigues(rvec)      # marker → OpenCV 相机系
+        M = np.diag([1.0, -1.0, -1.0])       # OpenCV → MuJoCo 相机系
+        rot_cam = M @ rot_cv                 # marker → MuJoCo 相机系
+        pos_cam = M @ tvec.ravel()
         if self.role == "eih":
             return {"target_fine": (pos_cam, rot_cam)}
-        # e2h：相机系 → 世界系（固定外参）
+        # e2h：相机系 → 世界系（固定外参，MuJoCo 约定）
         pos_w = self._cam_R @ pos_cam + self._cam_pos
         rot_w = self._cam_R @ rot_cam
         return {"ee_pose": (pos_w, rot_w)}
