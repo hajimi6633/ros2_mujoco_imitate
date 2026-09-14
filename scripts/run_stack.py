@@ -29,14 +29,18 @@ import os
 
 
 def _gl_backend():
-    """无显示环境时离屏渲染切 EGL（须先于任何 gl_context import 生效）。
+    """Linux 无显示环境时离屏渲染切 EGL（须先于任何 gl_context import 生效）。
 
-    MuJoCo 的 gl_context 按环境变量 MUJOCO_GL 在模块级选定后端：
-    未设置默认 GLFW（需 X11）；无头环境（CI/服务器，无 DISPLAY）创建
-    上下文必失败 → 渲染降级禁用。此处提前切 egl 保住离屏渲染；
-    已显式设置 MUJOCO_GL 或有 DISPLAY（桌面，viewer 依赖）则不动。
+    MuJoCo 的 gl_context 按环境变量 MUJOCO_GL 在模块级选定后端，
+    且合法性校验与平台绑定（Linux: egl/glx/osmesa，Windows: wgl，
+    macOS: cgl）——egl 仅 Linux 合法，跨平台设置会直接 RuntimeError。
+    本机桌面（Linux 有 DISPLAY / Windows / macOS 默认后端可用）不动；
+    已显式设置 MUJOCO_GL 的环境也不动。
     """
-    if not os.environ.get("MUJOCO_GL") and not os.environ.get("DISPLAY"):
+    import platform
+    if (platform.system() == "Linux"
+            and not os.environ.get("MUJOCO_GL")
+            and not os.environ.get("DISPLAY")):
         os.environ["MUJOCO_GL"] = "egl"
 
 # 已迁移的任务：名字 -> 组装器（后续 reach / pick_place 迁入后在此登记）
