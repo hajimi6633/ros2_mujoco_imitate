@@ -6,11 +6,30 @@
   3. 响应路径：快通道 /safety_state.latest 由 ArmController 每拍读；
      任务挂起走慢通道（ChargingAction 订阅本话题）
 两级分区：减速区（限速继续）→ 停止区（冻结 · 保持夹持）。
+
+检测实现（仿真验证期方案：固定相机背景差分）：
+  1. 首帧图像为背景（相机固定，静态场景）
+  2. 逐帧差分 + 阈值 + 形态学开运算去噪 + 连通域面积过滤 → 前景目标
+  3. 机器人圆柱掩膜：以基座为轴、可达半径 R、高 H 的竖直圆柱，
+     逐像素做射线-圆柱求交（闭式解，numpy 全图向量化），交上的像素
+     不参与差分——臂/枪全程在圆柱内运动，否则臂运动会误报侵入
+     （人只有走到圆柱视线遮挡区才漏检，此时距离判定早已进入 STOP）
+  4. 连通域底部像素（脚）反投影射线与地面 z=0 求交 → 世界坐标
+  5. d = 距基座水平距离 − R（到工作区边界的距离）→ zone 判定
+
+侵入者模拟：场景中 intruder 为 mocap body（无碰撞纯视觉），
+主窗口双击选中后 Ctrl+右键拖动即模拟人走近（SimNode 快照已带 mocap）。
+
+真机迁移期替换 _detect_intruders / _min_distance 为
+YOLO-nano 人体检测 + 3D 定位（接口不变，见 TODO 注释）。
 """
 from __future__ import annotations
 import threading
 import time as pytime
 from enum import Enum
+
+import numpy as np
+import mujoco
 
 from rclike import Node
 
@@ -24,36 +43,156 @@ class Zone(Enum):
 class SafetyNode(Node):
     threaded = True
 
-    def __init__(self, bus, clock, image_topic: str,
+    def __init__(self, bus, clock, sim, image_topic: str,
+                 camera: str = "cam_e2h",
                  slow_radius: float = 0.8, stop_radius: float = 0.4,
                  image_timeout: float = 0.2):
         super().__init__("safety_node", bus, clock)
         self.declare_parameter("slow_radius", slow_radius, "减速区阈值 (m)")
         self.declare_parameter("stop_radius", stop_radius, "停止区阈值 (m)")
         self.declare_parameter("image_timeout", image_timeout, "图像超时即失明 (s)")
+        self.declare_parameter("workspace_radius", 1.3,
+                               "机器人工作区圆柱半径 (m)：含臂展+枪全程轨迹")
+        self.declare_parameter("workspace_height", 2.2, "工作区圆柱高 (m)")
+        self.declare_parameter("diff_threshold", 25, "背景差分灰度阈值")
+        self.declare_parameter("min_area", 300, "前景连通域最小面积 (px)")
+        # fail-safe 恢复语义：检测消失 ≠ 安全（可能被工作区圆柱视线遮挡）
+        self.declare_parameter("stop_hold_s", 2.0,
+                               "STOP 最短保持时长 (s)：防遮挡漏检即刻放行")
+        self.declare_parameter("clear_frames", 5,
+                               "恢复 NORMAL 需连续无侵入帧数（防边缘抖动）")
         self._img = None
+        self._bg = None                       # 背景帧（灰度 float32，首帧锁定）
+        self._mask = None                     # 机器人圆柱掩膜（按分辨率惰性构建）
+        self._intruders: list = []            # 最新检测的侵入者（像素域）
         self._seen_first = False               # 启动宽限：未收到首帧前不视为失明
         self._last_alive_wall = None             # 最近一帧的墙钟时刻（流中断判定）
         self._stop_evt = threading.Event()
+        self._stop_since = 0.0                 # 本次 STOP 进入时刻（墙钟）
+        self._clear_n = 0                      # 连续无侵入帧计数（恢复去抖）
         self._pub = self.create_publisher("/safety_state")
         self.zone = Zone.NORMAL
         self.create_subscription(image_topic, self._on_img)
 
+        # ---- 相机内/外参 + 基座（构造期主线程读一次，e2h 固定相机不变）----
+        model, data = sim.model, sim.data
+        mujoco.mj_forward(model, data)        # 确保 cam_xpos/xmat 有效
+        cid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, camera)
+        if cid < 0:
+            raise ValueError(f"相机 '{camera}' 不存在")
+        self._cam_pos = data.cam_xpos[cid].copy()
+        # cam_xmat：世界←相机旋转（行主序），列 = 相机轴在世界系的分量
+        self._cam_R = data.cam_xmat[cid].reshape(3, 3).copy()
+        self._fovy = model.cam_fovy[cid]
+        bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "base")
+        self._base = data.xpos[bid].copy() if bid >= 0 \
+            else np.zeros(3)
+
+    # ---------- 检测（背景差分 + 圆柱掩膜 + 连通域） ----------
     def _on_img(self, img, stamp):
         self._seen_first = True
         self._last_alive_wall = pytime.time()
         self._img = (img, stamp)
 
+    def _K(self, h, w):
+        """针孔内参（MuJoCo 相机方形像素，fx=fy 由 fovy 推出）。"""
+        f = (h / 2) / np.tan(np.radians(self._fovy) / 2)
+        return f, f, w / 2, h / 2
+
+    def _build_mask(self, h, w):
+        """机器人圆柱掩膜：逐像素射线-圆柱求交（numpy 向量化闭式解）。
+
+        返回 bool 数组，True = 允许检测（圆柱外）；臂/枪被圆柱罩住不误报。
+        """
+        fx, fy, cx, cy = self._K(h, w)
+        us, vs = np.meshgrid(np.arange(w, dtype=float),
+                             np.arange(h, dtype=float))
+        # 像素 → 相机系射线（图像 v 向下 = 相机 -y；MuJoCo 相机看向 -z）
+        d_cam = np.stack([(us - cx) / fx, -(vs - cy) / fy,
+                          -np.ones_like(us)], axis=-1)
+        # 相机系 → 世界系
+        d = np.einsum("ij,hwj->hwi", self._cam_R, d_cam)
+        # 2D 射线-圆求交：解 |o_xy + t·d_xy − base_xy| = R
+        o = self._cam_pos
+        ex, ey = d[..., 0], d[..., 1]
+        ox, oy = o[0] - self._base[0], o[1] - self._base[1]
+        R = self.get_parameter("workspace_radius")
+        a = ex * ex + ey * ey
+        b = 2 * (ox * ex + oy * ey)
+        c = ox * ox + oy * oy - R * R
+        disc = b * b - 4 * a * c
+        hit = np.zeros((h, w), dtype=bool)
+        ok = disc > 0          # 有实根 = 射线与无限长圆柱相交
+        sq = np.sqrt(np.where(ok, disc, 0.0))
+        # 相机在圆柱外：取近交点 t = (−b − √disc) / 2a
+        with np.errstate(divide="ignore", invalid="ignore"):
+            t = (-b - sq) / (2 * a)
+        ok &= np.isfinite(t) & (t > 0)
+        z = o[2] + t * d[..., 2]
+        hit |= ok & (z >= 0) & (z <= self.get_parameter("workspace_height"))
+        return ~hit                         # True = 圆柱外，允许检测
+
     def _detect_intruders(self, img) -> list:
-        """TODO: 轻量检测（YOLO-nano 级）+ 人体分割 → 侵入者轮廓（世界系）。
-        膨胀补偿：轮廓按运动速度外扩（人 1.5m/s × 检测周期 + 裕量），
-        等价于对"下一刻可能在哪里"做保守估计。"""
-        return []
+        """背景差分 → 前景连通域。
+
+        返回 [{"bottom": (u, v), "area": px}, ...]（v 最大行 = 脚部像素）。
+        TODO 真机迁移：YOLO-nano 人体检测 + 分割（返回值结构不变）。
+        """
+        import cv2                              # 懒加载
+        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY).astype(np.float32)
+        if self._bg is None:
+            self._bg = gray                     # 首帧锁背景（相机固定）
+            return []
+        if self._mask is None or self._mask.shape != gray.shape:
+            self._mask = self._build_mask(*gray.shape)
+        thr = self.get_parameter("diff_threshold")
+        diff = np.abs(gray - self._bg) > thr
+        diff &= self._mask                      # 只看圆柱外（臂不误报）
+        # 开运算去孤立噪点 + 闭运算填目标内部空洞
+        kernel = np.ones((5, 5), np.uint8)
+        diff = cv2.morphologyEx(diff.astype(np.uint8), cv2.MORPH_OPEN,
+                                kernel)
+        diff = cv2.morphologyEx(diff, cv2.MORPH_CLOSE, kernel)
+        n, labels, stats, _ = cv2.connectedComponentsWithStats(diff)
+        out = []
+        min_area = self.get_parameter("min_area")
+        for i in range(1, n):                 # 0 = 背景
+            x, y, w_, h_, area = stats[i]
+            if area < min_area:
+                continue
+            out.append({"bottom": (x + w_ // 2, y + h_ - 1), "area": int(area)})
+        return out
 
     def _min_distance(self, intruders) -> float:
-        """TODO: 侵入点到工作区凸包 / 最近臂体的最小距离。"""
-        return float("inf")
+        """侵入者到工作区边界的最小距离（世界系，m）。
 
+        底部像素射线与地面 z=0 求交 → 距基座水平距离 − 工作半径。
+        俯视反投影的系统性误差 ~0.3m，方向偏保守（提前触发），可接受。
+        TODO 真机迁移：检测框 + 深度图 / 地面平面拟合。
+        """
+        if not intruders:
+            return float("inf")
+        h, w = self._bg.shape
+        fx, fy, cx, cy = self._K(h, w)
+        o, R3 = self._cam_pos, self._cam_R
+        best = float("inf")
+        R_ws = self.get_parameter("workspace_radius")
+        for it in intruders:
+            u, v = it["bottom"]
+            # MuJoCo 相机看向 -z：射线 z 分量为负
+            d_cam = np.array([(u - cx) / fx, -(v - cy) / fy, -1.0])
+            d = R3 @ d_cam
+            if abs(d[2]) < 1e-9:
+                continue                       # 射线近水平，不与地面相交
+            t = -o[2] / d[2]
+            if t <= 0:
+                continue
+            p = o + t * d                     # 地面交点
+            dist = np.hypot(p[0] - self._base[0], p[1] - self._base[1])
+            best = min(best, dist - R_ws)
+        return best
+
+    # ---------- worker（心跳 + fail-safe + 检测） ----------
     def start(self):
         threading.Thread(target=self._loop, daemon=True,
                          name=self.name).start()
@@ -77,13 +216,31 @@ class SafetyNode(Node):
                 pytime.sleep(0.01)
                 continue
             img, _ = snap
-            d = self._min_distance(self._detect_intruders(img))
+            self._intruders = self._detect_intruders(img)
+            d = self._min_distance(self._intruders)
+            now = pytime.monotonic()
+            in_stop_hold = (self.zone is Zone.STOP and
+                            now - self._stop_since <
+                            self.get_parameter("stop_hold_s"))
             if d < self.get_parameter("stop_radius"):
+                self._clear_n = 0
+                if self.zone is not Zone.STOP:
+                    self._stop_since = now      # 仅在切入 STOP 时计时
                 self._set_zone(Zone.STOP, f"intruder {d:.2f}m")
             elif d < self.get_parameter("slow_radius"):
-                self._set_zone(Zone.SLOW, f"intruder {d:.2f}m")
+                self._clear_n = 0
+                if not in_stop_hold:            # hold 期内不降级
+                    self._set_zone(Zone.SLOW, f"intruder {d:.2f}m")
             else:
-                self._set_zone(Zone.NORMAL, "")
+                if self.zone is Zone.NORMAL:
+                    pass                        # 已安全，无需动作
+                elif in_stop_hold:
+                    pass                        # hold 期：保持 STOP
+                elif self._clear_n < self.get_parameter("clear_frames"):
+                    self._clear_n += 1          # 去抖：等连续干净帧
+                else:
+                    self._clear_n = 0
+                    self._set_zone(Zone.NORMAL, "")
             self._img = None
             pytime.sleep(0.01)               # 每帧必检：跟随图像流节奏
 

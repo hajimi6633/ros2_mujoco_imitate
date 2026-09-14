@@ -52,6 +52,15 @@
       <geom name="object" type="box" size="0.035 0.035 0.035" rgba="0.9 0.2 0.2 1" mass="0.1"/>
     </body> -->
 
+    <!-- 侵入者模拟（mocap body，主窗口双击选中后 Ctrl+右键拖动）：
+         纯视觉体（contype/conaffinity=0 不参与物理碰撞），身高 ~1.7m 胶囊。
+         初始放在 e2h 相机视野外（相机后方），拖近工作区即模拟人侵入，
+         SafetyNode 背景差分检测 → 减速/停止分区 → 任务挂起。 -->
+    <body name="intruder" mocap="true" pos="3.5 2.0 0">
+      <geom name="intruder_body" type="capsule" fromto="0 0 0.15 0 0 1.35" size="0.22" rgba="0.85 0.25 0.1 1" contype="0" conaffinity="0"/>
+      <geom name="intruder_head" type="sphere" pos="0 0 1.5" size="0.13" rgba="0.85 0.25 0.1 1" contype="0" conaffinity="0"/>
+    </body>
+
     <!-- 充电枪 1：freejoint 使其可被抓取移动，初始由 eq_socgun_1 weld 固定在插座 -->
     <body name="charging_gun_1" pos="1.0888363 -0.073997 0.831233" quat="0.608761 0 0.793353 0">
       <freejoint/>

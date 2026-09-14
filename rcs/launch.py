@@ -2,9 +2,12 @@
 
 组装原则：
   - 主循环节点 add 顺序 = 执行顺序 = 数据依赖顺序
-    （任务 → 控制闸门 → 物理 → 渲染/显示）
-  - SafetyNode 为旁路线程（未来接检测算法）；渲染/显示为
-    主线程节点（Windows 线程 GL 限制，见 render_node.py）
+    （任务 → 控制闸门 → 物理 → 显示）
+  - 旁路线程节点（threaded）：渲染（RenderNode，GL 绑定）、视觉
+    （VisionNode，纯计算）、安全哨兵（SafetyNode，每帧必检）——
+    数据经 topic 的 latest 缓存/订阅回调交接，不占主循环
+    （历史：渲染曾为主循环节点，离屏渲染同步回读占主循环 90%+，
+    已迁移旁路线程，见 render_node.py 线程模型说明）
 显示三件套独立开关：render（渲染数据流）/ viewer（主窗口）/ cams（相机窗口）
 """
 from __future__ import annotations
@@ -48,13 +51,16 @@ def build_charging_stack(scene_xml: str, vision: bool = False,
     safety = None
     if render:
         renders = [RenderNode(bus, clock, sim.model, "cam_e2h", "/image_e2h"),
-                  RenderNode(bus, clock, sim.model, "cam_eih", "/image_eih")]
-        safety = SafetyNode(bus, clock, "/image_e2h")     # 旁路线程
+                   RenderNode(bus, clock, sim.model, "cam_eih", "/image_eih")]
+        # 安全哨兵：订阅 e2h 图像，背景差分检测侵入者（详见 safety_node.py）
+        safety = SafetyNode(bus, clock, sim, "/image_e2h", "cam_e2h")
         if vision:
             renders += [VisionNode(bus, clock, "/image_e2h",
-                                   "/ee_pose_vision", "e2h"),
+                                   "/ee_pose_vision", "e2h",
+                                   sim=sim, camera="cam_e2h"),
                         VisionNode(bus, clock, "/image_eih",
-                                   "/target_fine", "eih")]
+                                   "/target_fine", "eih",
+                                   sim=sim, camera="cam_eih")]
 
     viewer_node = ViewerNode(bus, clock, sim) if viewer else None
     cam_show_node = (CamShowNode(bus, clock,

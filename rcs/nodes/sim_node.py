@@ -91,8 +91,14 @@ class SimNode(Node):
         # 3) 发布状态与快照（时间戳 = 仿真时钟，全链新鲜度基准）
         t = self.clock.now
         self.pub_states.publish(self.joint_state(), stamp=t)
-        # 微秒级快照：qpos 深拷贝一次，之后渲染/视觉/安全全链传引用
-        self.pub_snapshot.publish(self.data.qpos.copy(), stamp=t)
+        # 微秒级快照：qpos + mocap 位姿深拷贝一次，之后渲染/视觉/安全全链传引用
+        # （mocap 必须带上：侵入者模拟是 mocap body， viewer 拖动改 mocap_pos，
+        #   不进快照则渲染画面看不到人体，背景差分无从检测）
+        self.pub_snapshot.publish(
+            (self.data.qpos.copy(),
+             self.data.mocap_pos.copy() if self.model.nmocap else None,
+             self.data.mocap_quat.copy() if self.model.nmocap else None),
+            stamp=t)
 
     def joint_state(self):
         return (self.data.qpos[self.arm_qposadr].copy(),

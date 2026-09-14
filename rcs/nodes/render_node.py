@@ -89,9 +89,10 @@ class RenderNode(Node):
         else:
             self._disabled = True             # 兄弟节点已判定 GL 不可用
 
-    def _on_snap(self, qpos, stamp):
-        """快照回调（主线程同步调用）：仅存引用 + 唤醒 worker。"""
-        self._snap = (qpos, stamp)
+    def _on_snap(self, snap, stamp):
+        """快照回调（主线程同步调用）：仅存引用 + 唤醒 worker。
+        snap = (qpos, mocap_pos, mocap_quat)。"""
+        self._snap = (snap, stamp)
         self._snap_evt.set()
 
     # ---------- 生命周期（threaded 节点） ----------
@@ -125,10 +126,14 @@ class RenderNode(Node):
             if now - getattr(self, "_last_wall", 0.0) < self._period - 1e-3:
                 continue
             self._last_wall = now
-            qpos, stamp = self._snap
+            (qpos, mpos, mquat), stamp = self._snap
             self._snap = None                 # 处理最新帧，跳帧不积压
             # 写入自己的 data；派生量重算也在这里（不影响主 MjData）
             self.rdata.qpos[:] = qpos
+            if mpos is not None and self.model.nmocap:
+                # mocap（侵入者模拟）：viewer 拖动同步进渲染画面
+                self.rdata.mocap_pos[:] = mpos
+                self.rdata.mocap_quat[:] = mquat
             mujoco.mj_forward(self.model, self.rdata)
             # 显式 MjrContext 渲染：场景更新 → 离屏渲染 → 读回像素
             mujoco.mjv_updateScene(self.model, self.rdata, self._vopt,
