@@ -74,10 +74,12 @@ def test_detect_recovers_known_pose(node):
     tvec = np.array([0.02, -0.01, -0.35])     # MuJoCo 系：前方 0.35m（z 负）
     frame = synth_frame(tvec, np.eye(3))
     result = node._detect(frame)
-    assert "target_fine" in result
-    pos, rot = result["target_fine"]
+    assert "target_pose" in result
+    pos, rot = result["target_pose"]
     assert np.linalg.norm(pos - tvec) < 0.008  # 位置闭环 < 8mm（warp 亚像素极限）
     assert rot_angle_err(rot, np.eye(3)) < 6.0  # 姿态 < 6°（PnP 倾斜固有噪声）
+    assert "overlay" in result                 # 角点框数据（CamShow 画框用）
+    assert np.array(result["overlay"]["corners"]).shape == (1, 4, 2)
 
 
 def test_detect_rotated_marker(node):
@@ -86,7 +88,7 @@ def test_detect_rotated_marker(node):
     tvec = np.array([-0.03, 0.02, -0.3])
     frame = synth_frame(tvec, R_true)
     result = node._detect(frame)
-    pos, rot = result["target_fine"]
+    pos, rot = result["target_pose"]
     assert np.linalg.norm(pos - tvec) < 0.008
     assert rot_angle_err(rot, R_true) < 6.0
 

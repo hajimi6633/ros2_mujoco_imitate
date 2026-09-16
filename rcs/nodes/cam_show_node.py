@@ -3,6 +3,10 @@
 订阅渲染节点发布的图像话题，按固定刷新率弹窗显示相机画面。
 与主窗口（ViewerNode）相互独立开关：只想看主窗口时不开本节点。
 
+视觉检测框叠加（本轮新增）：overlays 指定 {图像话题: 视觉输出话题}，
+显示时读取对应 VisionNode 最新检测结果，在画面上画 ArUco 角点框 +
+id 标注——视觉链路可直接观察（此前相机窗口看不出检测是否工作）。
+
 注意：OpenCV 的 imshow 必须在主线程调用（Windows GUI 限制），
 本节点为主循环节点，显示经 create_timer 节流（默认 ~15fps）。
 """
@@ -13,12 +17,15 @@ from rclike import Node
 
 class CamShowNode(Node):
     def __init__(self, bus, clock, windows: list,
+                 overlays: dict | None = None,
                  refresh: float = 0.066):
-        """windows: [(image_topic, 窗口标题), ...]"""
+        """windows: [(image_topic, 窗口标题), ...]
+        overlays: {image_topic: vision_out_topic}——对应窗口画检测框"""
         super().__init__("cam_show", bus, clock)
         import cv2                                # 懒加载：仅开启相机窗口时需要
         self.cv2 = cv2
         self._windows = list(windows)
+        self._overlays = dict(overlays or {})
         self._shown: set = set()                  # 已创建过的窗口标题
         self._closed: set = set()                 # 被用户点 X 关闭的窗口
         self.create_timer(refresh, self._show)
@@ -38,12 +45,32 @@ class CamShowNode(Node):
                 continue
             self._shown.add(title)
             # MuJoCo 渲染为 RGB，OpenCV 显示需转 BGR
-            self.cv2.imshow(title,
-                            self.cv2.cvtColor(s[0], self.cv2.COLOR_RGB2BGR))
+            img = self.cv2.cvtColor(s[0], self.cv2.COLOR_RGB2BGR)
+            img = self._draw_overlay(topic, img)
+            self.cv2.imshow(title, img)
         try:
             self.cv2.waitKey(1)
         except Exception:
             pass              # 全部窗口销毁后 QT 后端 waitKey 也可能抛错
+
+    def _draw_overlay(self, image_topic, img):
+        """有视觉检出时画角点框 + id（无检出原样返回）。"""
+        vtopic = self._overlays.get(image_topic)
+        if vtopic is None:
+            return img
+        s = self.latest(vtopic)
+        if s is None or "overlay" not in s[0]:
+            return img
+        import numpy as np
+        ov = s[0]["overlay"]
+        corners = ov["corners"]
+        # 视觉结果与当前帧存在 ~0.1s 时差，框可能轻微滞后（观察用途可接受）
+        quad = np.array(corners, dtype=np.int32).reshape(-1, 1, 2)
+        self.cv2.polylines(img, [quad], True, (0, 255, 0), 2)
+        u, v = int(corners[0][0][0]), int(corners[0][0][1])
+        self.cv2.putText(img, f'id={ov["marker_id"]}', (u, v - 6),
+                         self.cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+        return img
 
     def _visible(self, title) -> bool:
         """窗口是否可见；QT 后端在全部窗口销毁后查询会抛错，视为已关闭。"""

@@ -59,22 +59,35 @@ def build_charging_stack(scene_xml: str, vision: bool = False,
             # 安全哨兵：颜色分割检测黄色标识物（详见 safety_node.py）
             safety_node = SafetyNode(bus, clock, sim, "/image_e2h", "cam_e2h")
         if vision:
-            # 视觉定位：e2h 看场景标定码板（id=0，0.6m 板 → 图案 0.444m），
-            # eih 看枪尾码板（id=1，0.10m 板 → 图案 0.074m）。
-            # marker_size = 板宽 × 0.7407（PNG 图案占比，见 scene XML 注释）
+            # 视觉定位（两路均输出目标物位姿，经标定板→目标物偏差补偿）：
+            #   e2h：场景标定板（id=0）贴车插座旁 → /ee_pose_vision 输出
+            #        车插座世界位姿（任务状态机视觉伺服消费此话题）
+            #   eih：枪尾码板（id=1）x 偏置避开枪体自遮挡 → /target_fine
+            #        输出枪位姿（相机系）
+            # marker_size = 板宽 0.10 × 0.7407（PNG 图案占比，见 XML 注释）
             renders += [VisionNode(bus, clock, "/image_e2h",
                                    "/ee_pose_vision", "e2h",
                                    sim=sim, camera="cam_e2h",
-                                   marker_size=0.444, marker_id=0),
+                                   marker_size=0.074, marker_id=0,
+                                   marker_body="scene_marker",
+                                   target_body="car_socket",
+                                   face_offset=+0.003),
                         VisionNode(bus, clock, "/image_eih",
                                    "/target_fine", "eih",
                                    sim=sim, camera="cam_eih",
-                                   marker_size=0.074, marker_id=1)]
+                                   marker_size=0.074, marker_id=1,
+                                   marker_body="gun_marker",
+                                   target_body="charging_gun_1",
+                                   face_offset=-0.003)]
 
     viewer_node = ViewerNode(bus, clock, sim) if viewer else None
+    # overlays：vision 开启时相机窗口画 ArUco 检测框（观察视觉链路）
+    overlays = ({"/image_e2h": "/ee_pose_vision",
+                 "/image_eih": "/target_fine"} if vision else None)
     cam_show_node = (CamShowNode(bus, clock,
                                  [("/image_e2h", "cam_e2h"),
-                                  ("/image_eih", "cam_eih")])
+                                  ("/image_eih", "cam_eih")],
+                                 overlays=overlays)
                      if (cam_show and render) else None)
 
     ex = Executor(clock, dt=0.05)             # 50Hz 控制拍

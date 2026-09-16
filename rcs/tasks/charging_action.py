@@ -85,6 +85,21 @@ class ChargingAction(Node):
         self.dt_ctrl = self.get_parameter("ctrl_dt")
         self.gun_site_id = mujoco.mj_name2id(
             sim.model, mujoco.mjtObj.mjOBJ_SITE, GUN_SITE)
+        # ---- 视觉伺服（本轮接入）：目标物（车插座，旁贴 e2h 标定板）上
+        # 的 site → body 系局部位姿表（静态 body，模型常量）。
+        # _site_pose() 对这些 site 优先用 /ee_pose_vision（经 VisionNode
+        # 标定板→目标物偏差补偿），vision 关 / 视觉过期时回退 GT。----
+        self._vis_local = {}
+        for i in range(sim.model.nsite):
+            sname = mujoco.mj_id2name(sim.model, mujoco.mjtObj.mjOBJ_SITE, i)
+            bname = mujoco.mj_id2name(
+                sim.model, mujoco.mjtObj.mjOBJ_BODY, sim.model.site_bodyid[i])
+            if bname == CAR_SOCKET_BODY:
+                lR = np.zeros(9)
+                mujoco.mju_quat2Mat(lR, sim.model.site_quat[i])
+                self._vis_local[sname] = (sim.model.site_pos[i].copy(),
+                                           lR.reshape(3, 3))
+        self._vis_logged = False
         self.frames = FrameTree()
         self.admittance = AdmittanceController(
             mass=1.0, stiffness=self.get_parameter("admittance_stiffness"),
@@ -106,8 +121,11 @@ class ChargingAction(Node):
         P, O, C = PhaseData, GRIP_OPEN, GRIP_CLOSE
         self.phases = [
             # 1 抓取：预接近转正 → 到位 → 闭合 + weld 绑定
+            # 1a0 back_z=0.25：eih 视觉窗口——枪尾码板 x 侧偏 0.13m，EE
+            # 距枪尾 0.25m 时码板全幅入画（cam_eih fovy=60 水平半角
+            # 36.9°，入画深度 >0.22m）；0.15 时深度 0.19m 码板半出画
             P("1a0_pre", "move", site=GUN_SITE_2, T=3.0, rot_site=GUN_SITE_2,
-              full=True, back_z=0.15, grip=O),
+              full=True, back_z=0.25, grip=O),
             P("1a", "move", site=GUN_SITE_2, T=1.5, rot_site=GUN_SITE_2,
               full=True, grip=O),
             P("1b", "hold", hold_s=1.0, grip=O),
@@ -229,13 +247,13 @@ class ChargingAction(Node):
         sim = self.sim
         mujoco.mj_forward(sim.model, sim.data)
         q0 = sim.data.qpos[sim.arm_qposadr].copy()
-        pos, site_m = sim.site_pose(ph.site)
+        pos, site_m = self._site_pose(ph.site)
         if ph.back_z > 0:                   # 预接近点：沿 site z 后退
             pos = pos - ph.back_z * site_m[:, 2]
         sid = self.gun_site_id if ph.offset_gun else None
         target_rot, z_align = None, False
         if ph.rot_site is not None:
-            _, site_mat = sim.site_pose(ph.rot_site)
+            _, site_mat = self._site_pose(ph.rot_site)
             # 抓取前 TF 未注册 → 单位变换（对应旧 ctx.grasp_rot 默认 eye）
             target_rot = site_mat if (ph.offset_gun or
                                       not self.frames.has("gun")) else \
@@ -332,8 +350,10 @@ class ChargingAction(Node):
         sim = self.sim
         f_contact = sim.contact_force_between(GUN_BODY, CAR_SOCKET_BODY)
         f_mag = float(np.linalg.norm(f_contact))
-        car1, car1_mat = sim.site_pose(CAR_SITE_1)
-        car_done = sim.site_pose(CAR_SITE_DONE)[0]
+        # 视觉伺服核心：对心/轴向/推进目标全部来自 _site_pose——
+        # 视觉新鲜时每步闭环跟随视觉目标（标定板旁的车插座）
+        car1, car1_mat = self._site_pose(CAR_SITE_1)
+        car_done = self._site_pose(CAR_SITE_DONE)[0]
         ax = car1_mat[:, 2]                # 插座轴
         # 对心优先：实际横向偏差超阈值先横修（弹片口间隙仅 2.5mm）
         gun_act, _ = sim.site_pose(GUN_SITE)
@@ -524,5 +544,25 @@ class ChargingAction(Node):
     def p(self, name):
         return self.get_parameter(name)
 
+    def _site_pose(self, site_name):
+        """目标 site 位姿（视觉伺服入口）。
+
+        site 属于视觉目标物（car_socket，旁贴 e2h 标定板）且 /ee_pose_vision
+        新鲜 → 视觉目标物位姿 ∘ site 局部变换（持续伺服：插枪段每步调用）；
+        否则（vision 关 / 视觉过期 / 其他 site）→ GT，行为与原版一致。
+        完成判定类查询不走此入口（防视觉噪声误判），直接用 sim.site_pose。
+        """
+        local = self._vis_local.get(site_name)
+        if local is not None:
+            vis = self.pose.get_target_pose()
+            if vis is not None:
+                if not self._vis_logged:
+                    self._vis_logged = True
+                    self.log.info(f"视觉伺服启用: {site_name} <- /ee_pose_vision")
+                pos_b, rot_b = vis
+                lp, lR = local
+                return pos_b + rot_b @ lp, rot_b @ lR
+        return self.sim.site_pose(site_name)
+
     def _sp(self, site_name) -> np.ndarray:
-        return self.sim.site_pose(site_name)[0]
+        return self._site_pose(site_name)[0]
