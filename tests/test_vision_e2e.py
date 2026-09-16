@@ -136,13 +136,11 @@ def test_eih_outputs_gun_pose(h_real):
     遮挡码板，码板 x 偏置后仍露出可解码）。
     """
     cam_pos, cam_R = h_real.cam("cam_eih")
-    # 枪姿态：相机系下 +z=(0,sin15,-cos15)——码板 quat 绕 y 180°（+z 面
-    # 朝 EE），其 +z 面法向 = 枪系 -z 方向；枪 -z 朝相机偏上 15° 时
-    # 相机看到码板 +z 面（正常图案；-z 面镜像不可解码）。斜视角受
-    # 入画约束：码板 x 偏 0.13 + z 偏 0.422 的合成偏移在 cam_eih 转
-    # 90° 后须落半垂直角 30° 内（15° 时 ~26° 全幅入画，30° 出画）
-    ang = np.radians(15)
-    z = np.array([0, np.sin(ang), -np.cos(ang)])
+    # 枪姿态：相机系下 +z=(0,-sin30,cos30)——码板 quat 恒等（+z 面朝枪
+    # 尾外/EE），枪 +z 偏下朝相机时相机看到码板 +z 面（正常图案；
+    # -z 面镜像不可解码，正对渲染实验实测）
+    ang = np.radians(30)
+    z = np.array([0, -np.sin(ang), np.cos(ang)])
     x = np.array([1, 0, 0])
     y = np.cross(z, x)
     x = np.cross(y, z)

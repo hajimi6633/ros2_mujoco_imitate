@@ -104,16 +104,19 @@
            板 0.10m → 图案 0.10×0.7407≈0.074m（PnP marker_size）。
            x 侧偏 -0.13（径向避开枪头圆盘 r=0.05 + 板半宽 0.05 = 0.10
            的正对遮挡线，EE 沿枪轴看时码板侧向露出可解码）；
-           面朝向（实测修正）：MuJoCo box 的 **+z 面纹理正常、-z 面镜像**
-           （正对实验：+z 面检出 id=1，-z 面 rejected）——quat 绕 y 翻
-           180° 使 body +z 面朝枪尾外（EE 侧），EE 接近时可解码；
+           面朝向（正对渲染实验实测）：MuJoCo box 的 **+z 面纹理正常、
+           -z 面镜像**（quat 恒等时相机看 +z 面检出 id=1；绕 x/y 翻
+           180° 后看 -z 面 rejected）——quat 恒等使 body +z 面朝枪尾
+           外（EE 侧），EE 接近时看到正常图案。历史：整栈曾长期 0 检出，
+           真因是码板半出画（fovy=40 窄 + 1a0 预接近 back_z 不足），
+           非镜像；
            板位姿→枪位姿偏差（-0.13,0,-0.422 + 旋转）由 VisionNode
            构造期从模型自动推导（target_body="charging_gun_1"），
            输出枪位姿而非码板位姿；
            板上不放 site（渲染球遮挡图案中心致解码失败），图案中心
            GT = body 位姿 + R·(0,0,+0.003)（+z 面表面偏移）。
            纯视觉体不参与碰撞/接触 -->
-      <body name="gun_marker" pos="-0.13 0 -0.422" quat="0 0 1 0">
+      <body name="gun_marker" pos="-0.13 0 -0.422" quat="1 0 0 0">
         <geom name="gun_marker" type="box" size="0.05 0.05 0.003" material="aruco1_mat" contype="0" conaffinity="0"/>
       </body>
     </body>
