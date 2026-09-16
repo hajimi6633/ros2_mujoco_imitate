@@ -54,26 +54,31 @@ def detect_distance(node, world_pts, color=YELLOW):
 
 
 def test_far_intruder_normal_zone(node):
-    d, intr = detect_distance(node, [(2.4, -0.5, 0)])   # 距基座 2.47m
+    # 测试点随 cam_e2h 拉近 (2.6,-3.4,2.6)→(1.29,-1.96,1.77) 调整：
+    # 原 x 向远点 (2.4,-0.5,0) 投影 u>640 出画（无 blob 可检出）；
+    # 改 +y 方向远点，距基座 ~2.33m → d ≈ 1.0 NORMAL 区
+    d, intr = detect_distance(node, [(0.3, 2.3, 0)])
     assert len(intr) == 1
     assert d > 0.8                                       # NORMAL 区
 
 
 def test_mid_intruder_slow_zone(node):
-    d, intr = detect_distance(node, [(1.85, -0.5, 0)])  # d ≈ 0.55
+    # +y 方向中距点，距基座 ~1.79m → d ≈ 0.5 SLOW 区
+    d, intr = detect_distance(node, [(0.3, 1.75, 0)])
     assert len(intr) == 1
     assert 0.4 < d < 0.8                                 # SLOW 区
 
 
 def test_near_intruder_stop_zone(node):
-    d, intr = detect_distance(node, [(1.5, -0.5, 0)])   # d ≈ 0.27
+    # +y 方向近点，距基座 ~1.07m → 已入 workspace（d<0）→ STOP 区
+    d, intr = detect_distance(node, [(0.3, 1.0, 0)])
     assert len(intr) == 1
     assert d < 0.4                                       # STOP 区
 
 
 def test_pixel_roundtrip_consistency(node):
     """像素级闭环：反投影距离与几何真值一致（误差 < 0.1m）。"""
-    p = (1.85, -0.5, 0)
+    p = (0.3, 1.75, 0)                                   # 同 mid 点
     d, _ = detect_distance(node, [p])
     truth = np.hypot(p[0] - node._base[0], p[1] - node._base[1]) \
         - node.get_parameter("workspace_radius")
