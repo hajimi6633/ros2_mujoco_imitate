@@ -78,7 +78,7 @@ def build_charging_stack(scene_xml: str, vision: bool = False,
                                    marker_size=0.074, marker_id=1,
                                    marker_body="gun_marker",
                                    target_body="charging_gun_1",
-                                   face_offset=-0.003)]
+                                   face_offset=+0.003)]
 
     viewer_node = ViewerNode(bus, clock, sim) if viewer else None
     # overlays：vision 开启时相机窗口画 ArUco 检测框（观察视觉链路）

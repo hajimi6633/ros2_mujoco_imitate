@@ -100,22 +100,20 @@
       <site name="gun_site_1" type="sphere" rgba="1 0 1 0" size="0.01" quat="1 0 0 -1" pos="0 0 -0.3058310"/>
       <site name="gun_site_2" type="sphere" rgba="1 0 1 0" size="0.01" quat="1 0 0 -1" pos="0 0 -0.3958310"/>
       <site name="gun_site" type="sphere" rgba="1 0 1 0" size="0.01" quat="1 0 0 -1" pos="0 0 0"/>
-      <!-- 枪尾 ArUco 码板（eih 手眼精定位）：id=1，局部 -z 面朝 EE 接近方向。
+      <!-- 枪尾 ArUco 码板（eih 手眼精定位）：id=1，body +z 面朝 EE 接近方向。
            板 0.10m → 图案 0.10×0.7407≈0.074m（PnP marker_size）。
            x 侧偏 -0.13（径向避开枪头圆盘 r=0.05 + 板半宽 0.05 = 0.10
            的正对遮挡线，EE 沿枪轴看时码板侧向露出可解码）；
-           x 偏移落在 eih 画面水平方向（配 cam_eih fovy=60 水平半角
-           ~36.9°，深度 >0.17m 入画——1a0 预接近段全程可见）；码板
-           视线不穿夹爪手指（手指在相机系 ±y 开合向，x 向偏移的视线
-           锥与手指不相交）；
+           面朝向（实测修正）：MuJoCo box 的 **+z 面纹理正常、-z 面镜像**
+           （正对实验：+z 面检出 id=1，-z 面 rejected）——quat 绕 y 翻
+           180° 使 body +z 面朝枪尾外（EE 侧），EE 接近时可解码；
            板位姿→枪位姿偏差（-0.13,0,-0.422 + 旋转）由 VisionNode
            构造期从模型自动推导（target_body="charging_gun_1"），
            输出枪位姿而非码板位姿；
-           面朝向注意：MuJoCo box 的 -z 面从外侧看呈正常图案，实测
-           quat=1 时 eih 可正常解码；板上不放 site（渲染球遮挡图案
-           中心致解码失败），图案中心 GT = body 位姿 + R·(0,0,-0.003)。
+           板上不放 site（渲染球遮挡图案中心致解码失败），图案中心
+           GT = body 位姿 + R·(0,0,+0.003)（+z 面表面偏移）。
            纯视觉体不参与碰撞/接触 -->
-      <body name="gun_marker" pos="-0.13 0 -0.422" quat="1 0 0 0">
+      <body name="gun_marker" pos="-0.13 0 -0.422" quat="0 0 1 0">
         <geom name="gun_marker" type="box" size="0.05 0.05 0.003" material="aruco1_mat" contype="0" conaffinity="0"/>
       </body>
     </body>

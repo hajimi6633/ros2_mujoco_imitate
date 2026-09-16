@@ -121,11 +121,12 @@ class ChargingAction(Node):
         P, O, C = PhaseData, GRIP_OPEN, GRIP_CLOSE
         self.phases = [
             # 1 抓取：预接近转正 → 到位 → 闭合 + weld 绑定
-            # 1a0 back_z=0.25：eih 视觉窗口——枪尾码板 x 侧偏 0.13m，EE
-            # 距枪尾 0.25m 时码板全幅入画（cam_eih fovy=60 水平半角
-            # 36.9°，入画深度 >0.22m）；0.15 时深度 0.19m 码板半出画
+            # 1a0 back_z=0.35：eih 视觉窗口——枪尾码板 x 侧偏 0.13m 且
+            # cam_eih 绕光轴 90°（偏移落画面窄边），全幅入画需深度
+            # >0.31m（fovy=60 垂直半角 30° + 板半宽）；0.15/0.25 时深度
+            # 0.19/0.26m 码板半出画（实测 rejected）
             P("1a0_pre", "move", site=GUN_SITE_2, T=3.0, rot_site=GUN_SITE_2,
-              full=True, back_z=0.25, grip=O),
+              full=True, back_z=0.35, grip=O),
             P("1a", "move", site=GUN_SITE_2, T=1.5, rot_site=GUN_SITE_2,
               full=True, grip=O),
             P("1b", "hold", hold_s=1.0, grip=O),

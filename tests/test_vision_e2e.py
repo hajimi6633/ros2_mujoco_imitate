@@ -132,12 +132,17 @@ def rot_angle_err(R_det, R_true):
 def test_eih_outputs_gun_pose(h_real):
     """eih：枪尾码板（x 偏置）→ 输出补偿后的枪 body 位姿（相机系）。
 
-    枪斜置 30° 放相机前 ~0.7m（正对时枪头圆盘遮挡码板，伺服语义即斜视）。
+    枪斜置 15° 放相机前 ~0.7m（斜视伺服语义；正对时枪头圆盘部分
+    遮挡码板，码板 x 偏置后仍露出可解码）。
     """
     cam_pos, cam_R = h_real.cam("cam_eih")
-    # 枪姿态：相机系下 +z=(0,-sin30,cos30)（码面法向朝相机偏上 30°）
-    ang = np.radians(30)
-    z = np.array([0, -np.sin(ang), np.cos(ang)])
+    # 枪姿态：相机系下 +z=(0,sin15,-cos15)——码板 quat 绕 y 180°（+z 面
+    # 朝 EE），其 +z 面法向 = 枪系 -z 方向；枪 -z 朝相机偏上 15° 时
+    # 相机看到码板 +z 面（正常图案；-z 面镜像不可解码）。斜视角受
+    # 入画约束：码板 x 偏 0.13 + z 偏 0.422 的合成偏移在 cam_eih 转
+    # 90° 后须落半垂直角 30° 内（15° 时 ~26° 全幅入画，30° 出画）
+    ang = np.radians(15)
+    z = np.array([0, np.sin(ang), -np.cos(ang)])
     x = np.array([1, 0, 0])
     y = np.cross(z, x)
     x = np.cross(y, z)
@@ -156,7 +161,7 @@ def test_eih_outputs_gun_pose(h_real):
     mujoco.mj_forward(h_real.m, h_real.d)
 
     n = make_vision(h_real, "eih", "cam_eih", 0.074, 1,
-                    "gun_marker", "charging_gun_1", -0.003)
+                    "gun_marker", "charging_gun_1", +0.003)
     r = n._detect(h_real.render("cam_eih"))
     assert "target_pose" in r, "枪尾码板未检出（斜视几何或遮挡变化）"
     p, R = r["target_pose"]
