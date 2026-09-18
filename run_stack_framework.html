@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rcs 框架结构 & run_stack 运行流程</title>
+<style>
+  :root{
+    --bg:#f4f6fa; --card:#fff; --ink:#1f2a3d; --sub:#5b6b84;
+    --line:#d9dfe8; --accent:#2f6feb; --accent-soft:#e8f0fe;
+    --core:#6437d9; --core-soft:#f0ebfc;
+    --node:#0f9b8e; --node-soft:#e5f6f4;
+    --task:#e2682a; --task-soft:#fdeee3;
+    --io:#9c6b00; --io-soft:#fdf3dd;
+    --warn:#c0392b;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+       background:var(--bg);color:var(--ink);line-height:1.55}
+  .wrap{max-width:1080px;margin:0 auto;padding:28px 20px 60px}
+  header{border-bottom:2px solid var(--line);padding-bottom:16px;margin-bottom:22px}
+  header h1{font-size:26px;margin:0 0 6px}
+  header p{margin:0;color:var(--sub);font-size:14px}
+  .badge{display:inline-block;padding:2px 10px;border-radius:20px;font-size:12px;
+         background:var(--accent-soft);color:var(--accent);margin-right:6px;font-weight:600}
+  h2{font-size:19px;margin:34px 0 12px;padding-left:10px;border-left:4px solid var(--accent)}
+  h3{font-size:15px;margin:16px 0 8px}
+
+  /* 卡片 */
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;
+        padding:14px 16px;margin:10px 0;box-shadow:0 1px 3px rgba(0,0,0,.04)}
+  .grid{display:flex;flex-wrap:wrap;gap:14px}
+  .tile{flex:1 1 150px;min-width:150px;background:var(--card);border:1px solid var(--line);
+        border-top:3px solid var(--accent);border-radius:8px;padding:12px;font-size:13px}
+  .tile.core{border-top-color:var(--core);background:var(--core-soft)}
+  .tile.node{border-top-color:var(--node);background:var(--node-soft)}
+  .tile.task{border-top-color:var(--task);background:var(--task-soft)}
+  .tile b{display:block;font-size:14px;margin-bottom:3px}
+  .tile span{color:var(--sub);font-size:12px}
+  .tile small{display:block;color:var(--sub);font-size:11px;margin-top:4px}
+
+  /* 时序步骤 */
+  .flow{position:relative;margin:10px 0 0;padding-left:0}
+  .step{display:flex;gap:12px;position:relative;padding:6px 0 6px 0}
+  .step .num{flex:0 0 34px;height:34px;border-radius:50%;background:var(--accent);color:#fff;
+             font-weight:700;display:flex;align-items:center;justify-content:center;font-size:14px}
+  .step .num.core{background:var(--core)}
+  .step .num.par{background:var(--task)}
+  .step .num.done{background:var(--node)}
+  .step .body{flex:1;padding-top:2px}
+  .step .body b{font-size:14px}
+  .step .body .code{font-family:ui-monospace,Menlo,Consolas,monospace;background:#0f1b2d;color:#cfe3ff;
+                    border-radius:6px;padding:1px 7px;font-size:12px}
+  .step .body ul{margin:6px 0 0 18px;padding:0;color:var(--sub);font-size:13px}
+  .step .body ul li{margin:2px 0}
+
+  /* 数据流图 */
+  .chain{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:8px 0}
+  .chip{border:1px solid var(--line);border-radius:8px;padding:6px 10px;font-size:12.5px;
+        background:#fff;text-align:center;min-width:74px}
+  .chip b{display:block;font-size:12px}
+  .chip small{color:var(--sub);font-size:10.5px}
+  .chip.topic{background:#eef2f8;border-style:dashed;font-family:monospace;font-size:11px}
+  .arrow{color:var(--line);font-weight:700;font-size:14px}
+  .arrow.tag{color:var(--accent);font-size:11px;font-weight:600}
+
+  .legend{font-size:12px;color:var(--sub);margin:8px 0}
+  .legend .dot{display:inline-block;width:10px;height:10px;border-radius:3px;margin:0 4px 0 12px}
+  table{width:100%;border-collapse:collapse;font-size:13px;margin:8px 0}
+  th,td{border:1px solid var(--line);padding:7px 10px;text-align:left}
+  th{background:#f0f3f9;font-weight:600}
+  td code{font-family:ui-monospace,Menlo,monospace;background:#eef2f8;padding:0 5px;border-radius:4px;font-size:12px}
+  .note{font-size:12.5px;color:var(--sub);background:#fbfcff;border-left:3px solid var(--io);
+        padding:8px 12px;margin:10px 0;border-radius:4px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>rcs · 充电枪抓取-插拔任务 | 框架结构与运行流程</h1>
+  <p>
+    <span class="badge">Python</span><span class="badge">MuJoCo</span><span class="badge">ArUco 视觉伺服</span><span class="badge">单线程确定性内核 + 旁路线程</span>
+    —— 一个自定义的「进程内 ROS2-lite」微内核，控制器 / IK / 视觉 / 安全 / 显示均为协作式节点。
+  </p>
+</header>
+
+<!-- ============ 一、代码分层框架 ============ -->
+<h2>一、代码分框架</h2>
+
+<h3>1.1 目录分层</h3>
+<div class="grid">
+  <div class="tile core"><b>rclike/ 微内核</b><span>不依赖 rclpy/DDS 的进程内基础设施</span>
+    <small>core · comm · node · executor · action · frames</small></div>
+  <div class="tile node"><b>rcs/nodes/ 节点</b><span>可复用功能节点（主循环 + 旁路线程）</span>
+    <small>SimNode · ArmController · IKService · GraspNode · PoseNode · RenderNode · VisionNode · SafetyNode · ViewerNode · CamShowNode</small></div>
+  <div class="tile task"><b>rcs/tasks/ 任务</b><span>充电枪 6 阶段显式状态机</span>
+    <small>charging_action.ChargingAction（16 子段 Phase 状态机）</small></div>
+  <div class="tile node"><b>rcs/control/ 控制原语</b><span>IK 求解 / 轨迹 / 导纳 / 夹爪</span>
+    <small>ik_solver · trajectory · impedance · gripper</small></div>
+  <div class="tile task"><b>scripts/ 入口</b><span>CLI 启动器</span>
+    <small>run_stack.py（本图的主角）</small></div>
+  <div class="tile"><b>models/ resource</b><span>场景 / 机械臂 / 纹理</span>
+    <small>scene_table.xml · ur5e_gripper.xml · meshes/aruco0/1.png · camera 定义</small></div>
+</div>
+
+<h3>1.2 微内核 rclike 内部协作</h3>
+<div class="card">
+  <div class="chain">
+    <div class="chip"><b>core</b><small>SimClock·Logger·ParameterStore</small></div><span class="arrow">→</span>
+    <div class="chip"><b>comm</b><small>Topic(零拷贝+latest) · Service</small></div><span class="arrow">→</span>
+    <div class="chip"><b>node</b><small>Node 基类（参数/通信/定时/生命周期）</small></div><span class="arrow">→</span>
+    <div class="chip"><b>executor</b><small>Executor.spin() 单线程主循环</small></div><span class="arrow">→</span>
+    <div class="chip"><b>action</b><small>ActionServer (goal/feedback/result)</small></div>
+  </div>
+  <div class="legend">
+    <span class="dot" style="background:#eef2f8"></span>线程安全数据交接：旁路线程产物 → topic.latest，主循环非阻塞读取
+  </div>
+</div>
+
+<h3>1.3 两类节点</h3>
+<table>
+  <tr><th>类别</th><th>节点</th><th>执行模型</th><th>数据交接</th></tr>
+  <tr><td><b>主循环</b>（threaded=False）</td>
+      <td><code>SimNode · ArmController · IKService · GraspNode · PoseNode · ChargingAction</code></td>
+      <td>每控制拍（50Hz）由 Executor 按 add 顺序调 <code>on_tick()</code></td>
+      <td>依赖拍序，确定性；命令经 topic 传递</td></tr>
+  <tr><td><b>旁路线程</b>（threaded=True）</td>
+      <td><code>RenderNode · VisionNode · SafetyNode</code></td>
+      <td>各自 worker 线程，独立节流（渲染/视觉 10Hz、安全每帧）</td>
+      <td>产数据到 topic.latest；主循环轮询读取</td></tr>
+</table>
+
+<!-- ============ 二、启动运行流程 ============ -->
+<h2>二、启动 <code>/scripts/run_stack.py</code> 的运行流程</h2>
+
+<div class="flow">
+
+  <div class="step"><div class="num">1</div><div class="body">
+    <b>CLI 解析</b>
+    <ul><li><span class="code">python -m scripts.run_stack [--task charging] [--scene ...] [--vision] [--cams] [--safety] [--viewer] [--ticks N]</span></li>
+        <li><code>--render</code> 缺省自动推断：任一图像消费者（cams/vision/safety）开启则开，否则关</li></ul>
+  </div></div>
+
+  <div class="step"><div class="num">2</div><div class="body">
+    <b>GL 后端选型 <code>_gl_backend()</code></b>
+    <ul><li>Linux 无 <code>DISPLAY</code> 且未设 <code>MUJOCO_GL</code> → <code>os.environ["MUJOCO_GL"]="egl"</code>（离屏渲染）</li>
+        <li>必须在 import 任何 <code>gl_context</code> 之前生效（后端在模块级一次性绑定）</li></ul>
+  </div></div>
+
+  <div class="step"><div class="num">3</div><div class="body">
+    <b>组装节点栈 <span class="code">build_charging_stack(scene_xml, vision, render, viewer, cam_show, safety)</span></b>
+    <ul><li>创建 <code>SimClock, Bus</code>（全系统共享）</li>
+        <li>按数据依赖顺序实例化主循环节点：<code>SimNode → ArmController → IKService → GraspNode → PoseNode → ChargingAction</code></li>
+        <li>render 开启 → <code>RenderNode(cam_e2h→/image_e2h)</code> + <code>RenderNode(cam_eih→/image_eih)</code></li>
+        <li>vision 开启 → <code>VisionNode(e2h→/ee_pose_vision)</code> + <code>VisionNode(eih→/target_fine)</code>，订阅各自图像话题</li>
+        <li>viewer/cam_show → <code>ViewerNode</code> / <code>CamShowNode</code>（含 overlays 检测框叠加）</li></ul>
+  </div></div>
+
+  <div class="step"><div class="num">4</div><div class="body">
+    <b><span class="code">Executor(dt=0.05)</span> 注册节点 add()</b>
+    <ul><li>主循环节点入 <code>_nodes</code>；旁路线程节点（<code>threaded=True</code>）入 <code>_threaded</code> 并立即 <code>start()</code> 启动 worker 线程</li></ul>
+  </div></div>
+
+  <div class="step"><div class="num">5</div><div class="body">
+    <b>下发目标 <span class="code">task.send_goal({...})</span></b>
+    <ul><li>充电任务 <code>_build_phases()</code>：构造 16 子段显式 Phase 状态机，激活枪焊死约束 eq_socgun_1</li></ul>
+  </div></div>
+
+  <div class="step"><div class="num done">6</div><div class="body">
+    <b>主循环推进 <span class="code">executor.spin(...)</span></b>
+    <ul><li>无显示窗口：全速跑、<code>--ticks</code> 为拍数上限，任务终态退出；有窗口：1x 实时、关窗退出</li></ul>
+  </div></div>
+
+  <div class="step"><div class="num done">7</div><div class="body">
+    <b>单拍 <span class="code">spin_once()</span> = 确定性依赖序列</b>
+    <ul><li>① 主循环节点按序 <code>on_tick()</code>：任务推进 → 控制闸门 → IK 服务 → 抓取 → 位姿聚合 → 物理步进</li>
+        <li>② 到期定时器（Camera/Vison/CamShow 的 GUI 节流）</li>
+        <li>③ <code>clock.advance(dt)</code> 推进仿真时间</li></ul>
+  </div></div>
+
+  <div class="step"><div class="num par">8</div><div class="body">
+    <b>旁路线程并行（渲染 / 视觉 / 安全）</b>
+    <ul><li>RenderNode：GL 线程渲染 <code>cam_e2h/cam_eih</code> → 图像话题（跳帧不积压）</li>
+        <li>VisionNode：ArUco 检测 + PnP + 标定板→目标物偏差补偿 → /ee_pose_vision、/target_fine，周期日志</li>
+        <li>SafetyNode：颜色分割检测黄色标识物 → /safety_state（喂给 ArmController 闸门）</li></ul>
+  </div></div>
+
+  <div class="step"><div class="num done">9</div><div class="body">
+    <b>结束 <span class="code">executor._shutdown()</span></b>
+    <ul><li>先停主循环节点，再 <code>shutdown()</code> 旁路 worker（Join 等渲染/视觉线程收尾释放 GL）</li></ul>
+  </div></div>
+</div>
+
+<!-- ============ 三、数据流 ============ -->
+<h2>三、两条关键数据链</h2>
+
+<h3>3.1 控制链（任务 → 控制闸门 → 物理）</h3>
+<div class="card">
+  <div class="chain">
+    <div class="chip task"><b>ChargingAction</b><small>Phase 状态机 on_tick</small></div>
+    <span class="arrow tag">/q_des</span><span class="arrow">→</span>
+    <div class="chip task"><b>ArmController</b><small>安全闸门·冻结/限速</small></div>
+    <span class="arrow tag">/joint_cmd</span><span class="arrow">→</span>
+    <div class="chip"><b>SimNode</b><small>mj_step 物理推进</small></div>
+    <span class="arrow tag">/joint_states /state_snapshot</span><span class="arrow">→</span>
+    <div class="chip"><b>…回环</b><small>任务读取状态</small></div>
+  </div>
+  <div class="note">安全闸门直接钳制 <code>/joint_cmd</code>，不经任务层——对应真机安全继电器的位置。</div>
+</div>
+
+<h3>3.2 视觉伺服链（vision=True 时）</h3>
+<div class="card">
+  <div class="chain">
+    <div class="chip"><b>SimNode</b><small>发布快照</small></div>
+    <span class="arrow tag">/state_snapshot</span><span class="arrow">→</span>
+    <div class="chip node"><b>RenderNode</b><small>GL 离屏渲染</small></div>
+    <span class="arrow tag">/image_e2h /image_eih</span><span class="arrow">→</span>
+    <div class="chip node"><b>VisionNode</b><small>ArUco+PnP+偏差补偿</small></div>
+    <span class="arrow tag">/ee_pose_vision /target_fine</span><span class="arrow">→</span>
+    <div class="chip"><b>PoseNode</b><small>新鲜度窗口 0.3s</small></div>
+    <span class="arrow tag">get_target_pose()</span><span class="arrow">→</span>
+    <div class="chip task"><b>ChargingAction</b><small>_site_pose 视觉伺服 / GT回退</small></div>
+  </div>
+  <div class="legend">
+    视觉新鲜 → 目标物位姿 ∘ site 局部变换（持续伺服）；过期/缺失/vision 关 → 回退 <code>sim.site_pose</code>（GT）。
+    插枪又到底判定不使用视觉（防噪声误判完成）。
+  </div>
+</div>
+
+<!-- ============ 四、物理传感器与视觉目标任务 ============ -->
+<h2>四、相机 / 码板 / 视觉目标任务映射</h2>
+<table>
+  <tr><th>相机</th><th>安装</th><th>识别码板</th><th>输出话题</th><th>消费方 / 目标物</th></tr>
+  <tr><td><code>cam_e2h</code></td><td>眼在手外（工作区右前上方固定）</td><td>aruco0 (id=0) → scene_marker（车插座旁）</td><td><code>/ee_pose_vision</code></td><td>插枪视觉伺服 → 车插座位姿（世界系）</td></tr>
+  <tr><td><code>cam_eih</code></td><td>眼在手上（夹爪 carry_shell）</td><td>aruco1 (id=1) → gun_marker（枪尾）</td><td><code>/target_fine</code></td><td>枪位姿精定位（相机系，接近段）</td></tr>
+</table>
+
+<div class="note">
+  <b>可观测性</b>：VisionNode 每 5s 周期日志输出「检出率 + 目标位姿」；CamShowNode 在相机窗口叠加 ArUco 检测框 + id 标注（--cams --vision 时可见）。
+</div>
+
+<footer style="margin-top:34px;color:var(--sub);font-size:12px;border-top:1px solid var(--line);padding-top:10px">
+  自包含单文件 HTML 架构图 · 框架 = rclike 微内核 + 主循环/旁路线程节点 · 启动 = run_stack → build_charging_stack → executor.spin
+</footer>
+</div>
+</body>
+</html>
